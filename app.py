@@ -30,17 +30,24 @@ def _read_csv_from_path(path_str: str) -> pd.DataFrame:
 
 @st.cache_data(show_spinner=False)
 def _read_csv_from_bytes(data: bytes) -> pd.DataFrame:
+    import io
     return pd.read_csv(io.BytesIO(data))
 
 def load_df(csv_name: str = "WORLDJUNE25.csv") -> pd.DataFrame:
     """
-    Looks for WORLDJUNE25.csv in common spots; falls back to uploader.
+    Look for WORLDJUNE25.csv in common locations; else prompt upload.
+    Avoids strict reliance on __file__ (can be undefined in some deploys).
     """
     candidates = [
-        Path.cwd() / csv_name,
-        Path(__file__).resolve().parent.parent / csv_name,  # ../WORLDJUNE25.csv
-        Path(__file__).resolve().parent / csv_name,         # ./WORLDJUNE25.csv
+        Path.cwd() / csv_name,                 # repo root
+        Path.cwd().parent / csv_name,          # one level up
     ]
+    try:
+        here = Path(__file__).resolve().parent
+        candidates += [here / csv_name, here.parent / csv_name]
+    except Exception:
+        pass  # __file__ may be unavailable
+
     for p in candidates:
         if p.exists():
             return _read_csv_from_path(str(p))
@@ -50,9 +57,6 @@ def load_df(csv_name: str = "WORLDJUNE25.csv") -> pd.DataFrame:
     if up is None:
         st.stop()
     return _read_csv_from_bytes(up.getvalue())
-
-df = load_df("WORLDJUNE25.csv")
-
 # ----------------- LEAGUES + RATINGS (your full lists) -----------------
 INCLUDED_LEAGUES = [
     'England 1.', 'England 2.', 'England 3.', 'England 4.', 'England 5.',
@@ -652,7 +656,7 @@ for idx,(title,data) in enumerate(sections):
     y_top = draw_panel(y_top, title, data, show_xticks=is_last, draw_bottom_divider=not is_last)
 
 # Footer
-fig.text((LEFT + gutter + (1 - RIGHT))/2.0, BOT * 0.1, st.session_state.get("fz_footer_text", "Percentile Rank"),
+fig.text((LEFT + gutter + (1 - RIGHT))/2.0, BOT * 0.1, footer_caption_text,
          ha="center", va="center", color=LABEL_C, fontproperties=FOOTER_FP)
 
 st.pyplot(fig, use_container_width=True)
