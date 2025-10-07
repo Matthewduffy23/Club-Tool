@@ -1,5 +1,4 @@
-# app.py — Advanced Striker Scouting System (Role Template + Similar CFs + Feature Z)
-# Requires: streamlit, pandas, numpy, matplotlib, pillow
+# app.py — Role Template CF Scouting + Feature Z
 # Run: streamlit run app.py
 
 import io
@@ -23,30 +22,28 @@ st.set_page_config(page_title="Advanced Striker Scouting System", layout="wide")
 st.title("🔎 Advanced Striker Scouting System — CF Role Template")
 st.caption("Type a team and league, pick a single player or use all CFs from that team as the template. We’ll find close role matches.")
 
-# ----------------- DATA LOADER -----------------
+# ----------------- SAFE CSV LOADER -----------------
 @st.cache_data(show_spinner=False)
 def _read_csv_from_path(path_str: str) -> pd.DataFrame:
     return pd.read_csv(path_str)
 
 @st.cache_data(show_spinner=False)
 def _read_csv_from_bytes(data: bytes) -> pd.DataFrame:
-    import io
     return pd.read_csv(io.BytesIO(data))
 
 def load_df(csv_name: str = "WORLDJUNE25.csv") -> pd.DataFrame:
     """
-    Look for WORLDJUNE25.csv in common locations; else prompt upload.
-    Avoids strict reliance on __file__ (can be undefined in some deploys).
+    Look for CSV in common locations; avoid hard reliance on __file__.
     """
     candidates = [
-        Path.cwd() / csv_name,                 # repo root
-        Path.cwd().parent / csv_name,          # one level up
+        Path.cwd() / csv_name,              # repo root
+        Path.cwd().parent / csv_name,       # parent
     ]
     try:
-        here = Path(__file__).resolve().parent
+        here = Path(__file__).resolve().parent  # may not exist in some deploys
         candidates += [here / csv_name, here.parent / csv_name]
     except Exception:
-        pass  # __file__ may be unavailable
+        pass
 
     for p in candidates:
         if p.exists():
@@ -57,7 +54,10 @@ def load_df(csv_name: str = "WORLDJUNE25.csv") -> pd.DataFrame:
     if up is None:
         st.stop()
     return _read_csv_from_bytes(up.getvalue())
-# ----------------- LEAGUES + RATINGS (your full lists) -----------------
+
+df = load_df("WORLDJUNE25.csv")
+
+# ----------------- LEAGUES + RATINGS -----------------
 INCLUDED_LEAGUES = [
     'England 1.', 'England 2.', 'England 3.', 'England 4.', 'England 5.',
     'England 6.', 'England 7.', 'England 8.', 'England 9.', 'England 10.',
@@ -117,7 +117,7 @@ LEAGUE_STRENGTHS = {
     'Northern Ireland 1.':11.43,'England 10.':10.00,'Scotland 3.':10.00,'England 6.':10.00
 }
 
-# ----------------- CF FEATURES + BASE -----------------
+# ----------------- CF FEATURES -----------------
 FEATURES = [
     'Touches in box per 90', 'xG per 90',
     'Dribbles per 90', 'Progressive runs per 90',
@@ -153,14 +153,11 @@ with st.sidebar:
     default_leagues = sorted(seed) if seed else INCLUDED_LEAGUES
     leagues_sel = st.multiselect("Leagues (add or prune the presets)", leagues_avail, default=default_leagues)
 
-    # Position startswith
     pos_prefix = st.text_input("Position startswith", "CF")
     def position_filter(pos):
         return str(pos).strip().upper().startswith(str(pos_prefix).strip().upper())
 
     # Minutes / Age
-    df["Minutes played"] = pd.to_numeric(df["Minutes played"], errors="coerce")
-    df["Age"] = pd.to_numeric(df["Age"], errors="coerce")
     min_minutes, max_minutes = st.slider("Minutes played", 0, 6000, (1000, 6000))
     age_min_data = int(np.nanmin(df["Age"])) if df["Age"].notna().any() else 14
     age_max_data = int(np.nanmax(df["Age"])) if df["Age"].notna().any() else 45
@@ -171,10 +168,10 @@ with st.sidebar:
     df["Contract expires"] = pd.to_datetime(df.get("Contract expires"), errors="coerce")
     cutoff_year = st.slider("Max contract year (inclusive)", 2025, 2030, 2026)
 
-    # League strength
+    # League strength window
     min_strength, max_strength = st.slider("League quality (strength)", 0, 101, (0, 101))
     use_league_weighting = st.checkbox("Use league weighting in role score", value=False)
-    beta = st.slider("League weighting beta", 0.0, 1.0, 0.40, 0.05, help="0 = ignore league strength; 1 = only league strength")
+    beta = st.slider("League weighting beta", 0.0, 1.0, 0.40, 0.05)
 
     # Market value
     df["Market value"] = pd.to_numeric(df["Market value"], errors="coerce")
@@ -185,14 +182,14 @@ with st.sidebar:
     use_m = st.checkbox("Adjust in millions", True)
     if use_m:
         max_m = int(mv_cap // 1_000_000)
-        mv_min_m, mv_max_m = st.slider("Range (M€)", 0, max_m, (0, min(max_m, 10)))
+        default_cap_m = min(max_m, 10)
+        mv_min_m, mv_max_m = st.slider("Range (M€)", 0, max_m, (0, default_cap_m))
         min_value = mv_min_m * 1_000_000
         max_value = mv_max_m * 1_000_000
     else:
         min_value, max_value = st.slider("Range (€)", 0, mv_cap, (0, min(mv_cap, 10_000_000)), step=100_000)
 
     # Role score strictness
-    st.subheader("Role Score")
     decay_rate = st.slider("Exponential decay rate (higher = stricter)", 0.5, 10.0, 5.0, 0.5)
 
     # Table size
@@ -228,19 +225,13 @@ template_league = st.selectbox("League for template team", league_choices, index
 
 use_single_template_player = st.checkbox("Use single player only (otherwise averages all CFs at team)", value=True)
 
-players_in_team = []
-if template_team and template_league:
-    mask_tl = (
-        (df_f["Team"].astype(str) == template_team) &
-        (df_f["League"].astype(str) == template_league)
-    )
-    players_in_team = sorted(df_f.loc[mask_tl, "Player"].dropna().astype(str).unique())
-
-template_player_name = st.selectbox(
-    "Template player (if single)",
-    options=["— Select a player —"] + players_in_team if players_in_team else ["— none available —"],
-    index=0
+mask_tl = (
+    (df_f["Team"].astype(str) == template_team) &
+    (df_f["League"].astype(str) == template_league)
 )
+players_in_team = sorted(df_f.loc[mask_tl, "Player"].dropna().astype(str).unique()) if (template_team and template_league) else []
+player_options = (["— Select a player —"] + players_in_team) if players_in_team else ["— none available —"]
+template_player_name = st.selectbox("Template player (if single)", options=player_options, index=0)
 
 # ----------------- ROLE METRICS + TEMPLATE -----------------
 cf_df = df_f.copy()
@@ -258,10 +249,11 @@ if not template_team or not template_league:
     st.stop()
 
 if use_single_template_player:
+    picked = (template_player_name if (template_player_name and not str(template_player_name).startswith("—")) else None)
     template_df = cf_df[
         (cf_df["Team"].astype(str) == template_team) &
         (cf_df["League"].astype(str) == template_league) &
-        (cf_df["Player"].astype(str) == (template_player_name if (template_player_name and not template_player_name.startswith("—")) else ""))
+        (cf_df["Player"].astype(str) == (picked if picked else "__no_match__"))
     ].copy()
 else:
     template_df = cf_df[
@@ -289,7 +281,7 @@ comparison_df = cf_df[
     ~((cf_df["Team"].astype(str) == template_team) & (cf_df["League"].astype(str) == template_league))
 ].copy()
 
-# Scouting constraints (match your snippet)
+# Scouting constraints
 comparison_df = comparison_df[
     (comparison_df["Age"] <= 26) &
     (comparison_df["Market value"] <= 10_000_000) &
@@ -327,11 +319,7 @@ if rng <= 1e-12:
 else:
     base_score = 100.0 * exp(-decay_rate * ((comparison_df["Role Fit Distance"] - min_dist) / rng))
 
-# Blend: (1-beta)*role_score + beta*(league_strength*100)
-if isinstance(ls, pd.Series):
-    league_part = (ls * 100.0)
-else:
-    league_part = 0.0
+league_part = (ls * 100.0) if isinstance(ls, pd.Series) else 0.0
 comparison_df["Role Fit Score"] = (1.0 - beta) * base_score + beta * league_part
 
 ranked = comparison_df.sort_values(by="Role Fit Score", ascending=False).reset_index(drop=True)
@@ -341,31 +329,20 @@ st.header("🏅 Top Role Matches")
 cols_to_show = ["Player","Team","League","Age","Minutes played","Market value","Role Fit Score"]
 st.dataframe(ranked[cols_to_show].head(int(top_n)), use_container_width=True)
 
-# ----------------- FEATURE Z (underneath table) -----------------
+# ----------------- FEATURE Z (under the table) -----------------
 st.markdown("---")
 st.header("📋 Feature Z — White Percentile Board")
 
-# ======== Feature Z helpers (percentiles & value formatting) ========
-POLAR_METRICS = [
-    "Non-penalty goals per 90","xG per 90","Shots per 90",
-    "Dribbles per 90","Passes to penalty area per 90","Touches in box per 90",
-    "Aerial duels per 90","Aerial duels won, %","Passes per 90",
-    "Accurate passes, %","xA per 90","Progressive runs per 90",
-]
-
-# ensure presence if some of these aren't in dataset; filter to existing
-POLAR_METRICS = [m for m in POLAR_METRICS if m in df_f.columns]
-
-# Create a quick picker — default to best match
+# Controls (keep simple & compatible)
 left, right = st.columns([2,2])
 with left:
     options_ranked = ranked["Player"].astype(str).head(int(top_n)).tolist()
     any_pool = st.checkbox("Pick from entire filtered pool (not just Top N)", value=False)
-    if any_pool:
-        options = sorted(df_f["Player"].dropna().astype(str).unique())
-    else:
-        options = options_ranked
-    player_sel = st.selectbox("Choose player for Feature Z", options, index=0 if options else None)
+    options = sorted(df_f["Player"].dropna().astype(str).unique()) if any_pool else options_ranked
+    if not options:
+        st.info("No players available for Feature Z. Adjust filters.")
+        st.stop()
+    player_sel = st.selectbox("Choose player for Feature Z", options, index=0)
 
 with right:
     show_height = st.checkbox("Show height in info row", value=True)
@@ -373,47 +350,30 @@ with right:
     foot_override_text = st.text_input("Foot (e.g., Left)", value="", disabled=not foot_override_on)
     name_override_on = st.checkbox("Edit display name", value=False)
     name_override = st.text_input("Display name", "", disabled=not name_override_on)
+    footer_caption_text = st.text_input("Footer caption", "Percentile Rank")
 
-# Build player_row
+# Build row for chosen player
 player_row = df_f[df_f["Player"].astype(str) == str(player_sel)].head(1)
 if player_row.empty:
     st.info("Pick a player above.")
     st.stop()
 
-# Percentile helper
+# Percentiles against df_f
 def pct_series(col: str) -> float:
     vals = pd.to_numeric(df_f[col], errors="coerce").dropna()
     if vals.empty: return np.nan
     v = pd.to_numeric(player_row.iloc[0][col], errors="coerce")
     if pd.isna(v): return np.nan
-    # percentile rank (inclusive)
-    pct = (vals <= v).mean() * 100.0
-    return float(pct)
+    return float((vals <= v).mean() * 100.0)
 
 def val_of(col: str):
     v = player_row.iloc[0].get(col)
     if pd.isna(v): return (np.nan, "—")
     if isinstance(v, (int,float,np.floating)):
-        # simple formatting
-        if "%" in col:
-            return (float(v), f"{float(v):.0f}%")
-        else:
-            return (float(v), f"{float(v):.2f}")
+        return (float(v), f"{float(v):.0f}%" if "%" in col else f"{float(v):.2f}")
     return (v, str(v))
 
-# ======== Feature Z controls (images & caption) ========
-with st.expander("Feature Z options", expanded=False):
-    enable_images = st.checkbox("Add header images", value=True)
-    _CAPTION_DEFAULT = "Percentile Rank"
-    _edit_footer = st.toggle("Edit footer caption", value=False, key="fz_edit_footer")
-    footer_caption_text = st.text_input("Footer caption", _CAPTION_DEFAULT, disabled=not _edit_footer, key="fz_footer_text")
-
-    st.caption("Upload up to three header images (PNG recommended). Rightmost is the anchor.")
-    up_img1 = st.file_uploader("Image 1 (rightmost)", type=["png","jpg","jpeg","webp"], key="fz_img1") if enable_images else None
-    up_img2 = st.file_uploader("Image 2 (middle)",   type=["png","jpg","jpeg","webp"], key="fz_img2") if enable_images else None
-    up_img3 = st.file_uploader("Image 3 (leftmost)", type=["png","jpg","jpeg","webp"], key="fz_img3") if enable_images else None
-
-# ======== Feature Z data assembly (sections) ========
+# Gather Feature Z sections
 def _safe_get(sr, key, default="—"):
     try:
         v = sr.iloc[0].get(key, default)
@@ -438,12 +398,13 @@ foot    = _safe_get(player_row, "Foot", _safe_get(player_row, "Preferred Foot", 
 foot_display = (foot_override_text.strip() if (foot_override_on and foot_override_text and foot_override_text.strip()) else foot)
 height_text = ""
 for col in ["Height","Height (ft)","Height ft","Height (cm)"]:
-    if col in player_row.columns and str(_safe_get(player_row, col, "")).strip():
-        height_text = str(_safe_get(player_row, col, "")).strip()
+    v = _safe_get(player_row, col, "")
+    if v and v != "—":
+        height_text = str(v).strip()
         break
 
-# Sections (Attacking/Defensive/Possession) using POLAR_METRICS where applicable
-ATTACKING = []
+ATTACKING, DEFENSIVE, POSSESSION = [], [], []
+
 for lab, met in [
     ("Goals: Non-Penalty","Non-penalty goals per 90"),
     ("xG","xG per 90"),
@@ -456,7 +417,6 @@ for lab, met in [
     if met in df_f.columns:
         ATTACKING.append((lab, float(np.nan_to_num(pct_series(met), nan=0.0)), val_of(met)[1]))
 
-DEFENSIVE = []
 for lab, met in [
     ("Aerial Duels","Aerial duels per 90"),
     ("Aerial Duel Success %","Aerial duels won, %"),
@@ -467,7 +427,6 @@ for lab, met in [
     if met in df_f.columns:
         DEFENSIVE.append((lab, float(np.nan_to_num(pct_series(met), nan=0.0)), val_of(met)[1]))
 
-POSSESSION = []
 for lab, met in [
     ("Dribbles","Dribbles per 90"),
     ("Dribbling Success %","Successful dribbles, %"),
@@ -485,8 +444,7 @@ for lab, met in [
 sections = [("Attacking",ATTACKING),("Defensive",DEFENSIVE),("Possession",POSSESSION)]
 sections = [(t,lst) for t,lst in sections if lst]
 
-# ======== Feature Z style & drawing ========
-# Fonts (fallbacks)
+# ------------- Draw Feature Z -------------
 def _font_name_or_fallback(pref, fallback="DejaVu Sans"):
     installed = {f.name for f in fm.fontManager.ttflist}
     for n in pref:
@@ -513,23 +471,15 @@ gutter = 0.215
 BAR_FRAC = 0.92
 
 def pct_to_rgb(v):
-    # red → gold → green blend
     v=float(np.clip(v,0,100))
     TAB_RED=np.array([199,54,60]); TAB_GOLD=np.array([240,197,106]); TAB_GREEN=np.array([61,166,91])
     def _blend(c1,c2,t): c=c1+(c2-c1)*np.clip(t,0,1); return f"#{int(c[0]):02x}{int(c[1]):02x}{int(c[2]):02x}"
     return _blend(TAB_RED,TAB_GOLD,v/50) if v<=50 else _blend(TAB_GOLD,TAB_GREEN,(v-50)/50)
 
-def _open_upload(u):
-    if u is None: return None
-    try: return Image.open(u).convert("RGBA")
-    except Exception: return None
-
-fig_size   = (11.8, 9.6) if True else (10, 8)
+fig_size   = (11.8, 9.6)
 dpi = 120
 title_row_h = 0.125
-header_block_h = title_row_h + 0.055 if True else (0.075 + 0.020)
-img_box_w = img_box_h = 0.16
-img_gap = 0.003
+header_block_h = title_row_h + 0.055
 
 fig = plt.figure(figsize=fig_size, dpi=dpi); fig.patch.set_facecolor(PAGE_BG)
 
@@ -559,20 +509,6 @@ y2 = y1 - 0.039
 y3 = y2 - 0.039
 draw_pairs_line(row1, y1); draw_pairs_line(row2, y2); draw_pairs_line(row3, y3)
 
-# Images (optional)
-if up_img1 or up_img2 or up_img3:
-    def add_header_image(pil_img, right_index=0):
-        if pil_img is None: return
-        x_right_edge = 1 - RIGHT
-        x = x_right_edge - (right_index + 1) * img_box_w - right_index * img_gap
-        y_top_band = 1 - TOP - 0.006
-        y = y_top_band - img_box_h
-        ax_img = fig.add_axes([x, y, img_box_w, img_box_h])
-        ax_img.imshow(pil_img); ax_img.axis("off")
-    add_header_image(_open_upload(up_img1), right_index=0)
-    add_header_image(_open_upload(up_img2), right_index=1)
-    add_header_image(_open_upload(up_img3), right_index=2)
-
 # Divider
 fig.lines.append(plt.Line2D([LEFT, 1 - RIGHT],
                             [1 - TOP - header_block_h + 0.004]*2,
@@ -582,7 +518,6 @@ fig.lines.append(plt.Line2D([LEFT, 1 - RIGHT],
 def draw_panel(panel_top, title, tuples, *, show_xticks=False, draw_bottom_divider=True):
     n = len(tuples)
     if n == 0: return panel_top
-    # compute space
     total_rows = sum(len(lst) for _, lst in sections)
     rows_space_total = 1 - (TOP + BOT) - header_block_h - header_h*len(sections) - GAP*(len(sections)-1)
     row_slot = rows_space_total / max(total_rows,1)
@@ -596,28 +531,23 @@ def draw_panel(panel_top, title, tuples, *, show_xticks=False, draw_bottom_divid
     ax.tick_params(axis="y", left=False,  labelleft=False,  length=0)
     ax.set_yticks([]); ax.get_yaxis().set_visible(False)
 
-    # tracks + grid
     for i in range(n):
         ax.add_patch(plt.Rectangle((0, i-(BAR_FRAC/2)), 100, BAR_FRAC, color=TRACK, ec="none", zorder=0.5))
     for gx in ticks:
         ax.vlines(gx, -0.5, n-0.5, colors=(0,0,0,0.16), linewidth=0.8, zorder=0.75)
 
-    # bars (reverse to list top-to-bottom)
     for i,(lab,pct,val_str) in enumerate(tuples[::-1]):
         y = i; bar_w = float(np.clip(pct,0,100))
         ax.add_patch(plt.Rectangle((0, y-(BAR_FRAC/2)), bar_w, BAR_FRAC, color=pct_to_rgb(bar_w), ec="none", zorder=1.0))
         x_text = 1.0 if bar_w >= 3 else min(100.0, bar_w + 0.8)
         ax.text(x_text, y, val_str, ha="left", va="center", color="#0B0B0B", fontproperties=BAR_VALUE_FP, zorder=2.0, clip_on=False)
 
-    # 50% line
     ax.axvline(50, color="#000000", ls=(0,(4,4)), lw=1.5, alpha=0.7, zorder=3.5)
 
-    # left labels
     for i,(lab,_,_) in enumerate(tuples[::-1]):
         y_fig = (panel_top - header_h - n*row_slot) + ((i + 0.5) * row_slot)
         fig.text(LEFT, y_fig, lab, ha="left", va="center", color=LABEL_C, fontproperties=LABEL_FP)
 
-    # x ticks bottom
     if show_xticks:
         trans = ax.get_xaxis_transform()
         offset_inner   = ScaledTranslation(7/72,0,fig.dpi_scale_trans)
@@ -631,33 +561,19 @@ def draw_panel(panel_top, title, tuples, *, show_xticks=False, draw_bottom_divid
             elif gx==100: ax.text(gx, y_label, "%", transform=trans+offset_pct_100, ha="left", va="top", color="#000", fontproperties=TICK_FP)
             else:       ax.text(gx, y_label, "%", transform=trans+offset_inner,   ha="left", va="top", color="#000", fontproperties=TICK_FP)
 
-    # divider
     if draw_bottom_divider:
         y0 = (panel_top - header_h - n*row_slot) - 0.008
         fig.lines.append(plt.Line2D([LEFT, 1 - RIGHT], [y0, y0], transform=fig.transFigure, color=DIVIDER, lw=1.2, alpha=0.35))
     return (panel_top - header_h - n*row_slot) - GAP
 
-# Build tuples with percentiles from df_f
-def make_tuples(pairs):
-    out = []
-    for lab, met in pairs:
-        if met in df_f.columns:
-            out.append((lab, float(np.nan_to_num(pct_series(met), nan=0.0)), val_of(met)[1]))
-    return out
-
-# Use already-built ATTACKING/DEFENSIVE/POSSESSION
-sections = [("Attacking", ATTACKING), ("Defensive", DEFENSIVE), ("Possession", POSSESSION)]
-sections = [(t,lst) for t,lst in sections if lst]
-
-# Layout draw
+# draw
 y_top = 1 - TOP - header_block_h
 for idx,(title,data) in enumerate(sections):
     is_last = idx == len(sections)-1
     y_top = draw_panel(y_top, title, data, show_xticks=is_last, draw_bottom_divider=not is_last)
 
-# Footer
 fig.text((LEFT + gutter + (1 - RIGHT))/2.0, BOT * 0.1, footer_caption_text,
-         ha="center", va="center", color=LABEL_C, fontproperties=FOOTER_FP)
+         ha="center", va="center", color="#222222", fontproperties=FOOTER_FP)
 
 st.pyplot(fig, use_container_width=True)
 
@@ -674,4 +590,3 @@ st.download_button(
 )
 plt.close(fig)
 
-# ----------------- END -----------------
