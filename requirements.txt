@@ -1,5 +1,6 @@
-streamlit
-pandas
-numpy
-matplotlib
-scikit-lear
+streamlit>=1.32,<1.39
+pandas>=2.1,<2.4
+numpy>=1.26,<2.0
+matplotlib>=3.8,<3.9
+pillow>=10.0,<11.0
+
