@@ -1,6 +1,6 @@
 # app.py — CF Role Template Scouting + League→Team template flow
-# Adds league-quality mismatch penalty INSIDE distance + optional league-weight blend in score
-# Run: streamlit run app.py
+# Defaults: (1) League blend β ON at 0.40, (2) Use single template player = OFF
+# Stronger league-quality influence inside distance via spread-scaled additive penalty (toggleable)
 
 import io, math, uuid
 from pathlib import Path
@@ -15,10 +15,10 @@ st.set_page_config(page_title="Advanced Striker Scouting System", layout="wide")
 st.title("🔎 Advanced Striker Scouting System — CF Role Template")
 st.caption(
     "Template from RAW data (League → Team → optional Player). Candidate pool is filtered separately. "
-    "Similarity includes an optional league-quality mismatch penalty; final score can also blend league strength (β)."
+    "Similarity can include a league-quality mismatch penalty; final score can also blend league strength (β)."
 )
 
-# ======================== CSV loader (safe) ========================
+# ======================== CSV loader ========================
 @st.cache_data(show_spinner=False)
 def _read_csv_from_path(path_str: str) -> pd.DataFrame:
     return pd.read_csv(path_str)
@@ -150,18 +150,27 @@ with st.sidebar:
     # Role score settings
     st.subheader("Role Score")
     decay_rate = st.slider("Exp. decay (↑=stricter)", 0.5, 10.0, 5.0, 0.5)
-    use_league_weighting = st.checkbox("Blend in league strength (β)", value=False)
+
+    # DEFAULT: β ON at 0.40
+    use_league_weighting = st.checkbox("Blend in league strength (β)", value=True)
     beta = st.slider("β (0–1)", 0.0, 1.0, 0.40, 0.05, help="0=distance only, 1=league strength only")
 
-    # NEW: league mismatch penalty inside distance
+    # League mismatch INSIDE distance — stronger by scaling with base distance spread
     use_league_mismatch = st.checkbox(
         "Penalise league mismatch inside distance (α, p)", value=True,
         help="Adds a distance-penalty based on |candidate league − template league|."
     )
-    alpha = st.slider("League mismatch weight α", 0.0, 2.0, 0.60, 0.05,
-                      help="Scales how much league difference matters inside the distance.")
+    # Wider max and higher default so it *matters*
+    alpha = st.slider("League mismatch weight α", 0.0, 5.0, 1.20, 0.05,
+                      help="Scales mismatch; combined with distance spread for real impact.")
     p_exp = st.slider("League mismatch exponent p", 1.0, 3.0, 1.50, 0.10,
                       help=">1 makes large league gaps disproportionately harsher.")
+    penalty_mode = st.selectbox(
+        "Penalty combine mode",
+        ["Additive (stronger)", "Quadrature (gentler)"],
+        index=0,
+        help="Additive: base + scaled penalty (strong). Quadrature: sqrt(base^2 + penalty^2) (gentler)."
+    )
 
     top_n = st.number_input("Top N (table)", 5, 200, 50, 5)
 
@@ -195,7 +204,9 @@ templ_teams = [t for t in templ_teams_all if search.lower() in t.lower()] or tem
 template_team = st.selectbox("Template team", templ_teams)
 
 min_minutes_template = st.slider("Minimum minutes for template CFs", 0, 6000, 1000, 100)
-use_single_template_player = st.checkbox("Use single player only (else avg of team CFs)", True)
+
+# DEFAULT: Use single template player OFF
+use_single_template_player = st.checkbox("Use single player only (else avg of team CFs)", False)
 
 tmpl_pos_ok = lambda p: str(p).strip().upper().startswith("CF")
 df_template_source = df[
@@ -244,7 +255,6 @@ st.dataframe(
 )
 
 template_vector = template_df[TEMPLATE_METRICS].mean()
-# NEW: template league strength for mismatch penalty
 template_strength = float(LEAGUE_STRENGTHS.get(template_league, 0.0))
 
 # ======================== matching (on candidate pool) ========================
@@ -258,9 +268,9 @@ if cf_pool.empty:
     st.warning("No candidates after age/value/minutes caps. Loosen pool filters or caps.")
     st.stop()
 
-def row_dist(row):
-    # Base Euclidean across role metrics (same as before)
-    base = norm([
+# --- First compute BASE distance (without penalty) to know its spread ---
+def base_row_dist(row):
+    return norm([
         row['Opportunities']      - template_vector['Opportunities'],
         row['Ball Carrying']      - template_vector['Ball Carrying'],
         row['Aerial Requirement'] - template_vector['Aerial Requirement'],
@@ -269,14 +279,24 @@ def row_dist(row):
         row['Retention']          - template_vector['Retention'],
     ])
 
-    # Optional league mismatch penalty INSIDE the distance
-    if use_league_mismatch:
-        ls_cand = float(LEAGUE_STRENGTHS.get(str(row['League']), 0.0))   # 0–100
-        delta = abs(ls_cand - template_strength) / 100.0                # 0–1
-        penalty = alpha * (delta ** p_exp)
-        return math.sqrt(base*base + penalty*penalty)
-    else:
+cf_pool["_base_dist"] = cf_pool.apply(base_row_dist, axis=1)
+base_min, base_max = float(cf_pool["_base_dist"].min()), float(cf_pool["_base_dist"].max())
+base_rng = max(1e-9, base_max - base_min)  # spread used to scale penalty so it has teeth
+
+def row_dist(row):
+    base = row["_base_dist"]
+    if not use_league_mismatch:
         return base
+
+    ls_cand = float(LEAGUE_STRENGTHS.get(str(row['League']), 0.0))   # 0–100
+    delta = abs(ls_cand - template_strength) / 100.0                 # 0–1
+    # scale penalty by the spread of base distances so it matters across datasets
+    scaled_penalty = alpha * (delta ** p_exp) * base_rng
+
+    if penalty_mode.startswith("Additive"):
+        return base + scaled_penalty                 # STRONGER
+    else:
+        return math.sqrt(base*base + scaled_penalty*scaled_penalty)  # gentler
 
 cf_pool["Role Fit Distance"] = cf_pool.apply(row_dist, axis=1)
 
@@ -288,7 +308,7 @@ if rng <= 1e-12:
 else:
     base_score = 100.0 * exp(-decay_rate * ((cf_pool["Role Fit Distance"] - min_d) / rng))
 
-# league weighting (candidate league only) — optional blend
+# league weighting (candidate league only) — optional blend (DEFAULT ON @ β=0.4)
 if use_league_weighting:
     league_part = cf_pool["League"].map(LEAGUE_STRENGTHS).fillna(0.0)  # 0–100 scale
 else:
@@ -354,7 +374,6 @@ def pct_series(col: str) -> float:
     if vals.empty: return np.nan
     v = pd.to_numeric(player_row.iloc[0][col], errors="coerce")
     if pd.isna(v): return np.nan
-    # percentile rank within df_pool
     return float((vals <= v).mean() * 100.0)
 
 def val_of(col: str):
@@ -386,7 +405,7 @@ for col in ["Height","Height (ft)","Height ft","Height (cm)"]:
         height_text = str(v).strip()
         break
 
-# ---------- sections (only include metrics that exist) ----------
+# ---------- sections ----------
 ATTACKING, DEFENSIVE, POSSESSION = [], [], []
 for lab, met in [
     ("Goals: Non-Penalty","Non-penalty goals per 90"),
@@ -429,11 +448,13 @@ sections = [(t,lst) for t,lst in sections if lst]
 
 # ---------- drawing ----------
 def _font_name_or_fallback(pref, fallback="DejaVu Sans"):
+    from matplotlib import font_manager as fm
     installed = {f.name for f in fm.fontManager.ttflist}
     for n in pref:
         if n in installed: return n
     return fallback
 
+from matplotlib.font_manager import FontProperties
 FONT_TITLE_FAMILY = _font_name_or_fallback(["Tableau Bold","Tableau Sans Bold","Tableau"])
 FONT_BOOK_FAMILY  = _font_name_or_fallback(["Tableau Book","Tableau Sans","Tableau"])
 TITLE_FP     = FontProperties(family=FONT_TITLE_FAMILY, weight='bold',     size=24)
@@ -459,11 +480,11 @@ def pct_to_rgb(v):
     def _blend(c1,c2,t): c=c1+(c2-c1)*np.clip(t,0,1); return f"#{int(c[0]):02x}{int(c[1]):02x}{int(c[2]):02x}"
     return _blend(TAB_RED,TAB_GOLD,v/50) if v<=50 else _blend(TAB_GOLD,TAB_GREEN,(v-50)/50)
 
-fig_size   = (11.8, 9.6)
-dpi = 120
-title_row_h = 0.125
-header_block_h = title_row_h + 0.055
+import matplotlib.pyplot as plt
+from matplotlib.transforms import ScaledTranslation
 
+fig_size   = (11.8, 9.6); dpi = 120
+title_row_h = 0.125; header_block_h = title_row_h + 0.055
 fig = plt.figure(figsize=fig_size, dpi=dpi); fig.patch.set_facecolor(PAGE_BG)
 
 # Title
@@ -482,19 +503,15 @@ def draw_pairs_line(pairs_line, y):
             t3 = fig.text(x, y, "  |  ", ha="left", va="top", color="#555555", fontproperties=INFO_VALUE_FP)
             fig.canvas.draw(); x += t3.get_window_extent(renderer).width / fig.bbox.width
 
-row1 = [("Position: ",pos), ("Age: ",age), ("Height: ", (height_text if (show_height and height_text) else "—"))]
+row1 = [("Position: ",pos), ("Age: ",age), ("Height: ", height_text if (show_height and height_text) else "—")]
 row2 = [("Games: ",games), ("Goals: ",goals), ("Assists: ",assists)]
 row3 = [("Minutes: ",minutes), ("Foot: ",foot_display)]
-
 title_y = 1 - TOP - 0.010
-y1 = title_y - 0.055
-y2 = y1 - 0.039
-y3 = y2 - 0.039
+y1 = title_y - 0.055; y2 = y1 - 0.039; y3 = y2 - 0.039
 draw_pairs_line(row1, y1); draw_pairs_line(row2, y2); draw_pairs_line(row3, y3)
 
 # Divider
-fig.lines.append(plt.Line2D([LEFT, 1 - RIGHT],
-                            [1 - TOP - header_block_h + 0.004]*2,
+fig.lines.append(plt.Line2D([LEFT, 1 - RIGHT],[1 - TOP - header_block_h + 0.004]*2,
                             transform=fig.transFigure, color=DIVIDER, lw=0.8, alpha=0.35))
 
 # Panels
@@ -573,6 +590,7 @@ st.download_button(
     key=f"download_feature_z_{uuid.uuid4().hex}"
 )
 import matplotlib.pyplot as _plt_cleanup; _plt_cleanup.close(fig)
+
 
 
 
