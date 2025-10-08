@@ -11,11 +11,11 @@ import streamlit as st
 from numpy.linalg import norm
 from numpy import exp
 
-st.set_page_config(page_title="Advanced Striker Scouting System", layout="wide")
-st.title("🔎 Advanced Striker Scouting System — CF Role Template")
+st.set_page_config(page_title="Club Striker Scouting System", layout="wide")
+st.title("🔎 Advanced Club ST Scouting System")
 st.caption(
-    "Template from RAW data (League → Team → optional Player). Candidate pool is filtered separately. "
-    "Similarity can include a league-quality mismatch penalty; final score can also blend league strength (β)."
+    "Club Selection "
+    "Individual player specific or generalized role"
 )
 
 # ======================== CSV loader ========================
@@ -193,7 +193,7 @@ if df_pool.empty:
 
 # ======================== template (RAW df, unaffected by pool filters) ========================
 st.markdown("---")
-st.header("🎯 Template selection (RAW data) — League → Team → Player (optional)")
+st.header("🎯 Club Selection")
 
 template_league_list = sorted([str(x) for x in df["League"].dropna().unique()])
 template_league = st.selectbox("Template league (scopes team list)", template_league_list)
@@ -248,7 +248,7 @@ if template_df.empty:
     st.error("No template player(s) after selection. Pick a player or untick single-player.")
     st.stop()
 
-st.subheader("🧩 Players used for Role Template (RAW, unaffected by pool filters)")
+st.subheader("🧩 Players used for Role Template")
 st.dataframe(
     template_df[["Player","Minutes played","Position","League"]].sort_values("Minutes played", ascending=False),
     use_container_width=True
@@ -326,7 +326,7 @@ st.dataframe(
 
 # ======================== Feature Z (under the table) ========================
 st.markdown("---")
-st.header("📋 Feature Z — White Percentile Board")
+st.header("Advanced Individual Player Analysis")
 
 # lazy imports so the app paints fast
 import matplotlib.pyplot as plt
