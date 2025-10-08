@@ -1,4 +1,5 @@
-# app.py — CF Role Template Scouting + League→Team template flow + League weighting + Feature Z
+# app.py — CF Role Template Scouting + League→Team template flow
+# Adds league-quality mismatch penalty INSIDE distance + optional league-weight blend in score
 # Run: streamlit run app.py
 
 import io, math, uuid
@@ -12,7 +13,10 @@ from numpy import exp
 
 st.set_page_config(page_title="Advanced Striker Scouting System", layout="wide")
 st.title("🔎 Advanced Striker Scouting System — CF Role Template")
-st.caption("Template from RAW data (League → Team → optional Player). Candidate pool is filtered separately. Role fit blends distance and optional league strength.")
+st.caption(
+    "Template from RAW data (League → Team → optional Player). Candidate pool is filtered separately. "
+    "Similarity includes an optional league-quality mismatch penalty; final score can also blend league strength (β)."
+)
 
 # ======================== CSV loader (safe) ========================
 @st.cache_data(show_spinner=False)
@@ -137,7 +141,7 @@ with st.sidebar:
     else:
         pool_min_value, pool_max_value = st.slider("Range (€)", 0, mv_cap, (0, min(mv_cap, 10_000_000)), step=100_000)
 
-    # League quality window (restored)
+    # League quality window (filter)
     min_strength, max_strength = st.slider(
         "League quality (strength)", 0, 101, (0, 101),
         help="Filter candidates by league strength (0–100)."
@@ -148,6 +152,16 @@ with st.sidebar:
     decay_rate = st.slider("Exp. decay (↑=stricter)", 0.5, 10.0, 5.0, 0.5)
     use_league_weighting = st.checkbox("Blend in league strength (β)", value=False)
     beta = st.slider("β (0–1)", 0.0, 1.0, 0.40, 0.05, help="0=distance only, 1=league strength only")
+
+    # NEW: league mismatch penalty inside distance
+    use_league_mismatch = st.checkbox(
+        "Penalise league mismatch inside distance (α, p)", value=True,
+        help="Adds a distance-penalty based on |candidate league − template league|."
+    )
+    alpha = st.slider("League mismatch weight α", 0.0, 2.0, 0.60, 0.05,
+                      help="Scales how much league difference matters inside the distance.")
+    p_exp = st.slider("League mismatch exponent p", 1.0, 3.0, 1.50, 0.10,
+                      help=">1 makes large league gaps disproportionately harsher.")
 
     top_n = st.number_input("Top N (table)", 5, 200, 50, 5)
 
@@ -230,6 +244,8 @@ st.dataframe(
 )
 
 template_vector = template_df[TEMPLATE_METRICS].mean()
+# NEW: template league strength for mismatch penalty
+template_strength = float(LEAGUE_STRENGTHS.get(template_league, 0.0))
 
 # ======================== matching (on candidate pool) ========================
 cf_pool = add_role_metrics(df_pool)
@@ -243,7 +259,8 @@ if cf_pool.empty:
     st.stop()
 
 def row_dist(row):
-    return norm([
+    # Base Euclidean across role metrics (same as before)
+    base = norm([
         row['Opportunities']      - template_vector['Opportunities'],
         row['Ball Carrying']      - template_vector['Ball Carrying'],
         row['Aerial Requirement'] - template_vector['Aerial Requirement'],
@@ -251,6 +268,15 @@ def row_dist(row):
         row['Goal Output']        - template_vector['Goal Output'],
         row['Retention']          - template_vector['Retention'],
     ])
+
+    # Optional league mismatch penalty INSIDE the distance
+    if use_league_mismatch:
+        ls_cand = float(LEAGUE_STRENGTHS.get(str(row['League']), 0.0))   # 0–100
+        delta = abs(ls_cand - template_strength) / 100.0                # 0–1
+        penalty = alpha * (delta ** p_exp)
+        return math.sqrt(base*base + penalty*penalty)
+    else:
+        return base
 
 cf_pool["Role Fit Distance"] = cf_pool.apply(row_dist, axis=1)
 
@@ -262,7 +288,7 @@ if rng <= 1e-12:
 else:
     base_score = 100.0 * exp(-decay_rate * ((cf_pool["Role Fit Distance"] - min_d) / rng))
 
-# league weighting (candidate league only)
+# league weighting (candidate league only) — optional blend
 if use_league_weighting:
     league_part = cf_pool["League"].map(LEAGUE_STRENGTHS).fillna(0.0)  # 0–100 scale
 else:
