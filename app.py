@@ -649,7 +649,7 @@ lookback_days = st.slider("Look-back (days)", 3, 60, 21, disabled=not include_on
 
 import requests, json, datetime as dt, re
 
-HF_API_URL = "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.2"
+HF_API_URL = "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.3"
 HEADERS = {"Authorization": f"Bearer {st.secrets.get('HF_API_KEY', '')}"}
 
 def generate_report_hf(prompt: str) -> str:
