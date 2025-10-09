@@ -3,8 +3,7 @@ pandas
 numpy
 matplotlib
 scikit-learn
-openai
-serpapi
+requests
 
 
 
