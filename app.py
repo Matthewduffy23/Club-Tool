@@ -19,7 +19,7 @@ st.set_page_config(page_title="Club Striker Scouting — Tiles", layout="wide")
 st.title("🔎 Advanced Club ST Scouting — Tiles View")
 st.caption(
     "Club Selection → Role Template matching with glossy tiles instead of a table. "
-    "Right label shows overall Fit %. Dropdown per tile lets you set a FotMob ID to override the photo."
+    "Right label shows overall Fit %. Dropdown per tile lets you paste a custom image URL to override the photo."
 )
 
 # ======================== CSV loader ========================
@@ -435,12 +435,13 @@ def playmakerstats_image_by_name_team(name: str, team: str) -> str | None:
     return None
 
 # FotMob pattern
-FOTMOB_URL = lambda pid: f"https://images.fotmob.com/image_resources/playerimages/{str(pid).strip()}.png"
 PLACEHOLDER_IMG = "https://i.redd.it/43axcjdu59nd1.jpeg"
+if "photo_map" not in st.session_state:
+    st.session_state["photo_map"] = {}
 
 # Session mapping for per-player overrides
 if "fotmob_map" not in st.session_state:
-    st.session_state["fotmob_map"] = {}
+    st.session_state["photo_map"] = {}
 
 # Helpers for dropdown metrics (percentiles vs pool)
 def pct_series_for_player(player_row: pd.Series, col: str, within_df: pd.DataFrame) -> float:
@@ -467,14 +468,19 @@ for idx, row in ranked.head(int(top_n)).iterrows():
 
     # avatar resolution: 1) FotMob override → 2) PlaymakerStats search → 3) placeholder
     key_id = f"{name}|||{team}|||{league}"
-    fm_id = st.session_state["fotmob_map"].get(key_id, "")
+# If a custom image URL override exists, prefer it (with cache-bust)
+override_url = st.session_state.get("photo_map", {}).get(key_id, "")
+    fm_id = st.session_state["photo_map"].get(key_id, "")
     if fm_id:
         # cache-bust the browser so the new image shows immediately
         avatar_url = FOTMOB_URL(fm_id) + f"?t={int(time.time())}"
     else:
         avatar_url = playmakerstats_image_by_name_team(name, team) or PLACEHOLDER_IMG
 
-    if DEBUG_PHOTOS:
+    # Apply override last so it always wins
+if override_url:
+        avatar_url = override_url + f"?t={int(time.time())}"
+if DEBUG_PHOTOS:
         st.write(f"PHOTO DEBUG → '{name}' / '{team}' → {avatar_url}")
 
     # color for the main pill based on fit
@@ -569,23 +575,26 @@ for idx, row in ranked.head(int(top_n)).iterrows():
 
         # --- FotMob override input ---
         fm_input = st.text_input(
-            "FotMob Player ID (override avatar — e.g. 75115)",
-            value=fm_id,
+            "Custom image URL (override avatar — e.g., https://cdn.site/player.png)",
+            value=st.session_state.get("photo_map", {}).get(key_id, ""),
             key=f"fm_{idx}_{uuid.uuid4().hex[:6]}"
         )
         col_a, col_b = st.columns([1,3])
         with col_a:
             if st.button("Apply to this player", key=f"apply_{idx}"):
-                val = fm_input.strip()
-                if not val.isdigit():
-                    st.error("Please enter a numeric FotMob ID.")
+                val = (img_input if 'img_input' in locals() else '')
+                val = (val or '').strip()
+                if not val:
+                    st.error("Please paste an image URL.")
+                elif not (val.startswith("http://") or val.startswith("https://")):
+                    st.error("Image URL must start with http:// or https://")
                 else:
-                    st.session_state["fotmob_map"][key_id] = val
+                    st.session_state.setdefault("photo_map", {})[key_id] = val
                     st.success("Saved!")
                     st.rerun()
         with col_b:
             if st.button("Clear override", key=f"clear_{idx}"):
-                st.session_state["fotmob_map"].pop(key_id, None)
+                st.session_state["photo_map"].pop(key_id, None)
                 st.info("Cleared.")
                 st.rerun()
 
@@ -859,6 +868,71 @@ st.download_button(
 )
 import matplotlib.pyplot as _plt_cleanup
 _plt_cleanup.close(fig)
+
+    # left-side labels aligned to each bar row
+    for i, (lab, _, _) in enumerate(tuples[::-1]):
+        y_fig = (panel_top - header_h - n * row_slot) + ((i + 0.5) * row_slot)
+        fig.text(LEFT, y_fig, lab, ha="left", va="center", color=LABEL_C, fontproperties=LABEL_FP)
+
+    # optional x-axis tick marks at the bottom panel only
+    if show_xticks:
+        trans = ax.get_xaxis_transform()
+        offset_inner   = ScaledTranslation(7/72, 0, fig.dpi_scale_trans)
+        offset_pct_0   = ScaledTranslation(4/72, 0, fig.dpi_scale_trans)
+        offset_pct_100 = ScaledTranslation(10/72, 0, fig.dpi_scale_trans)
+        y_label = -0.075
+        for gx in ticks:
+            ax.plot([gx, gx], [-0.03, 0.0], transform=trans, color=(0, 0, 0, 0.6), lw=1.1, clip_on=False, zorder=4)
+            ax.text(gx, y_label, f"{int(gx)}", transform=trans, ha="center", va="top",
+                    color="#000", fontproperties=TICK_FP, zorder=4, clip_on=False)
+            if gx == 0:
+                ax.text(gx, y_label, "%", transform=trans + offset_pct_0, ha="left", va="top",
+                        color="#000", fontproperties=TICK_FP)
+            elif gx == 100:
+                ax.text(gx, y_label, "%", transform=trans + offset_pct_100, ha="left", va="top",
+                        color="#000", fontproperties=TICK_FP)
+            else:
+                ax.text(gx, y_label, "%", transform=trans + offset_inner, ha="left", va="top",
+                        color="#000", fontproperties=TICK_FP)
+
+    # subtle divider under the panel
+    if draw_bottom_divider:
+        y0 = (panel_top - header_h - n * row_slot) - 0.008
+        fig.lines.append(plt.Line2D([LEFT, 1 - RIGHT], [y0, y0], transform=fig.transFigure,
+                                    color=DIVIDER, lw=1.2, alpha=0.35))
+    return (panel_top - header_h - n * row_slot) - GAP
+
+
+# draw all sections
+y_top = 1 - TOP - header_block_h
+for sec_idx, (sec_title, sec_data) in enumerate(sections):
+    last = (sec_idx == len(sections) - 1)
+    y_top = draw_panel(y_top, sec_title, sec_data, show_xticks=last, draw_bottom_divider=not last)
+
+# footer caption
+fig.text((LEFT + gutter + (1 - RIGHT)) / 2.0, BOT * 0.1,
+         footer_caption_text if 'footer_caption_text' in globals() else "Percentile Rank",
+         ha="center", va="center", color="#222222", fontproperties=FOOTER_FP)
+
+# render to Streamlit
+st.pyplot(fig, use_container_width=True)
+
+# download PNG
+buf = io.BytesIO()
+fig.savefig(buf, format="png", dpi=150, bbox_inches="tight", facecolor=fig.get_facecolor())
+buf.seek(0)
+st.download_button(
+    "⬇️ Download Feature Z (PNG)",
+    data=buf.getvalue(),
+    file_name=f"{str(name_).replace(' ','_')}_featureZ.png",
+    mime="image/png",
+    key=f"download_feature_z_{uuid.uuid4().hex}"
+)
+
+# cleanup
+import matplotlib.pyplot as _plt_cleanup
+_plt_cleanup.close(fig)
+
 
 
 
