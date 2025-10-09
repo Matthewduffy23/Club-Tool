@@ -819,56 +819,6 @@ def draw_panel(panel_top, title, tuples, *, show_xticks=False, draw_bottom_divid
         x_text = 1.0 if bar_w >= 3 else min(100.0, bar_w + 0.8)
         ax.text(x_text, y, val_str, ha="left", va="center", color="#0B0B0B", fontproperties=BAR_VALUE_FP, zorder=2.0, clip_on=False)
 
-    ax.axvline(50, color="#000000", ls=(0,(4,4)), lw=1.5, alpha=0.7, zorder=3.5)
-
-    for i,(lab,_,_) in enumerate(tuples[::-1]):
-        y_fig = (panel_top - header_h - n*row_slot) + ((i + 0.5) * row_slot)
-        fig.text(LEFT, y_fig, lab, ha="left", va="center", color=LABEL_C, fontproperties=LABEL_FP)
-
-    if show_xticks:
-        trans = ax.get_xaxis_transform()
-        offset_inner   = ScaledTranslation(7/72,0,fig.dpi_scale_trans)
-        offset_pct_0   = ScaledTranslation(4/72,0,fig.dpi_scale_trans)
-        offset_pct_100 = ScaledTranslation(10/72,0,fig.dpi_scale_trans)
-        y_label = -0.075
-        for gx in ticks:
-            ax.plot([gx,gx],[-0.03,0.0], transform=trans, color=(0,0,0,0.6), lw=1.1, clip_on=False, zorder=4)
-            ax.text(gx, y_label, f"{int(gx)}", transform=trans, ha="center", va="top", color="#000", fontproperties=TICK_FP, zorder=4, clip_on=False)
-            if gx==0:   ax.text(gx, y_label, "%", transform=trans+offset_pct_0,   ha="left", va="top", color="#000", fontproperties=TICK_FP)
-            elif gx==100: ax.text(gx, y_label, "%", transform=trans+offset_pct_100, ha="left", va="top", color="#000", fontproperties=TICK_FP)
-            else:       ax.text(gx, y_label, "%", transform=trans+offset_inner,   ha="left", va="top", color="#000", fontproperties=TICK_FP)
-
-    if draw_bottom_divider:
-        y0 = (panel_top - header_h - n*row_slot) - 0.008
-        fig.lines.append(plt.Line2D([LEFT, 1 - RIGHT], [y0, y0], transform=fig.transFigure, color=DIVIDER, lw=1.2, alpha=0.35))
-    return (panel_top - header_h - n*row_slot) - GAP
-
-# draw sections
-y_top = 1 - TOP - header_block_h
-for idx,(title,data) in enumerate(sections):
-    is_last = idx == len(sections)-1
-    y_top = draw_panel(y_top, title, data, show_xticks=is_last, draw_bottom_divider=not is_last)
-
-# footer
-fig.text((LEFT + gutter + (1 - RIGHT))/2.0, BOT * 0.1, footer_caption_text,
-         ha="center", va="center", color="#222222", fontproperties=FOOTER_FP)
-
-st.pyplot(fig, use_container_width=True)
-
-# download
-buf = io.BytesIO()
-fig.savefig(buf, format="png", dpi=150, bbox_inches="tight", facecolor=fig.get_facecolor())
-buf.seek(0)
-st.download_button(
-    "⬇️ Download Feature Z (PNG)",
-    data=buf.getvalue(),
-    file_name=f"{str(name_).replace(' ','_')}_featureZ.png",
-    mime="image/png",
-    key=f"download_feature_z_{uuid.uuid4().hex}"
-)
-import matplotlib.pyplot as _plt_cleanup
-_plt_cleanup.close(fig)
-
     # left-side labels aligned to each bar row
     for i, (lab, _, _) in enumerate(tuples[::-1]):
         y_fig = (panel_top - header_h - n * row_slot) + ((i + 0.5) * row_slot)
@@ -932,6 +882,8 @@ st.download_button(
 # cleanup
 import matplotlib.pyplot as _plt_cleanup
 _plt_cleanup.close(fig)
+
+
 
 
 
