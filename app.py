@@ -1,10 +1,10 @@
 # Club Fit Tiles App — merges Role Template Scouting (app.py) with Top-20 Tiles UI (app_top20_tiles.py)
 # Key changes vs original:
 # - Replaces Top Role Matches table with glossy tiles showing each candidate and their club fit % (league-weighted) top-right.
-# - Adds PlaymakerStats photo resolver with optional per-player FotMob ID override in the dropdown to replace the avatar.
+# - Adds PlaymakerStats/zerozero photo resolver with optional per-player **custom image URL** override in the dropdown.
 # - Keeps the original Club Selection → Role Template flow, role distance, league mismatch penalties, and Feature Z chart/export.
 
-import io, math, uuid, re, time, unicodedata
+import io, math, uuid, re, time
 from pathlib import Path
 from urllib.parse import quote
 
@@ -371,9 +371,7 @@ st.markdown(
 )
 
 PALETTE=[(0,(208,2,27)),(50,(245,166,35)),(65,(248,231,28)),(75,(126,211,33)),(85,(65,117,5)),(100,(40,90,4))]
-
 def _lerp(a,b,t): return tuple(int(round(a[i]+(b[i]-a[i])*t)) for i in range(3))
-
 def rating_color(v:float)->str:
     v=max(0.0,min(100.0,float(v)))
     for i in range(len(PALETTE)-1):
@@ -403,44 +401,39 @@ def _http_get_text(url: str, retries: int = 1, timeout: int = 12) -> str:
             time.sleep(0.25); continue
     return ""
 
-def _extract_og_image(html: str) -> str | None:
+def _extract_og_image(html: str):
     m = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', html, flags=re.I)
     return m.group(1) if m else None
 
 @st.cache_data(show_spinner=False, ttl=24*3600)
-def playmakerstats_image_by_name_team(name: str, team: str) -> str | None:
+def playmakerstats_image_by_name_team(name: str, team: str):
     q = f"{name} {team}".strip()
+    # PlaymakerStats (EN)
     search_url = f"https://www.playmakerstats.com/search.php?search={quote(q)}"
     html = _http_get_text(search_url, retries=1)
     if html:
         links = re.findall(r'href=["\'](/(?:player|jogador)\.php\?id=\d+[^"\']*)', html, flags=re.I)
         if links:
-            rel = links[0]
-            p_html = _http_get_text("https://www.playmakerstats.com" + rel, retries=1)
+            p_html = _http_get_text("https://www.playmakerstats.com" + links[0], retries=1)
             if p_html:
                 img = _extract_og_image(p_html)
                 if img:
                     return img
-    # fallback zerozero
+    # zerozero.pt fallback
     search_url2 = f"https://www.zerozero.pt/procura.php?search={quote(q)}"
     html2 = _http_get_text(search_url2, retries=1)
     if html2:
-        links = re.findall(r'href=["\'](/jogador\.php\?id=\d+[^"\']*)', html2, flags=re.I)
-        if links:
-            p_html2 = _http_get_text("https://www.zerozero.pt" + links[0], retries=1)
+        links2 = re.findall(r'href=["\'](/jogador\.php\?id=\d+[^"\']*)', html2, flags=re.I)
+        if links2:
+            p_html2 = _http_get_text("https://www.zerozero.pt" + links2[0], retries=1)
             if p_html2:
                 img2 = _extract_og_image(p_html2)
                 if img2:
                     return img2
     return None
 
-# FotMob pattern
 PLACEHOLDER_IMG = "https://i.redd.it/43axcjdu59nd1.jpeg"
 if "photo_map" not in st.session_state:
-    st.session_state["photo_map"] = {}
-
-# Session mapping for per-player overrides
-if "fotmob_map" not in st.session_state:
     st.session_state["photo_map"] = {}
 
 # Helpers for dropdown metrics (percentiles vs pool)
@@ -454,9 +447,8 @@ def pct_series_for_player(player_row: pd.Series, col: str, within_df: pd.DataFra
     return float((vals <= v).mean() * 100.0)
 
 # Render tiles
-shown = 0
+st.write("")  # tiny spacer
 for idx, row in ranked.head(int(top_n)).iterrows():
-    shown += 1
     name  = str(row.get("Player",""))
     team  = str(row.get("Team",""))
     league= str(row.get("League",""))
@@ -466,21 +458,18 @@ for idx, row in ranked.head(int(top_n)).iterrows():
     fit   = float(row.get("Role Fit Score",0.0))
     fit_pct = max(0, min(100, int(round(fit))))
 
-    # avatar resolution: 1) FotMob override → 2) PlaymakerStats search → 3) placeholder
+    # avatar resolution: 1) custom URL override → 2) PlaymakerStats search → 3) placeholder
     key_id = f"{name}|||{team}|||{league}"
-# If a custom image URL override exists, prefer it (with cache-bust)
-override_url = st.session_state.get("photo_map", {}).get(key_id, "")
-    fm_id = st.session_state["photo_map"].get(key_id, "")
-    if fm_id:
-        # cache-bust the browser so the new image shows immediately
-        avatar_url = FOTMOB_URL(fm_id) + f"?t={int(time.time())}"
-    else:
-        avatar_url = playmakerstats_image_by_name_team(name, team) or PLACEHOLDER_IMG
 
-    # Apply override last so it always wins
-if override_url:
+    # default via PlaymakerStats/zerozero
+    avatar_url = playmakerstats_image_by_name_team(name, team) or PLACEHOLDER_IMG
+
+    # custom override (wins; add cache-buster)
+    override_url = st.session_state.get("photo_map", {}).get(key_id, "")
+    if override_url:
         avatar_url = override_url + f"?t={int(time.time())}"
-if DEBUG_PHOTOS:
+
+    if DEBUG_PHOTOS:
         st.write(f"PHOTO DEBUG → '{name}' / '{team}' → {avatar_url}")
 
     # color for the main pill based on fit
@@ -494,7 +483,7 @@ if DEBUG_PHOTOS:
     <div class='wrap'>
       <div class='player-card'>
         <div class='leftcol'>
-          <div class='avatar' style=\"background-image:url('{avatar_url}');\"></div>
+          <div class='avatar' style="background-image:url('{avatar_url}');"></div>
           <div class='row'><span class='chip'>{age}y</span><span class='chip'>{minutes}m</span></div>
         </div>
         <div>
@@ -512,9 +501,9 @@ if DEBUG_PHOTOS:
     <div class='divider'></div>
     """, unsafe_allow_html=True)
 
-    # === dropdown: metrics + FotMob override ===
+    # === dropdown: metrics + image URL override ===
     with st.expander("▼ Show individual metrics / Set photo override"):
-        # three sections similar to your second app
+        # three sections (percentiles vs df_pool)
         ATTACKING = []
         for lab, met in [
             ("Goals: Non-Penalty","Non-penalty goals per 90"),
@@ -554,7 +543,7 @@ if DEBUG_PHOTOS:
             if met in df_pool.columns:
                 POSSESSION.append((lab, pct_series_for_player(row, met, df_pool)))
 
-        def section_html(title: str, items: list[tuple[str,float]]):
+        def section_html(title: str, items):
             rows=[]
             for lab, pct in items:
                 pct_i = int(round(max(0.0, min(100.0, float(pct)))))
@@ -573,17 +562,16 @@ if DEBUG_PHOTOS:
         )
         st.markdown(col_html, unsafe_allow_html=True)
 
-        # --- FotMob override input ---
-        fm_input = st.text_input(
+        # --- Custom image URL override ---
+        img_input = st.text_input(
             "Custom image URL (override avatar — e.g., https://cdn.site/player.png)",
             value=st.session_state.get("photo_map", {}).get(key_id, ""),
-            key=f"fm_{idx}_{uuid.uuid4().hex[:6]}"
+            key=f"img_{idx}_{uuid.uuid4().hex[:6]}"
         )
-        col_a, col_b = st.columns([1,3])
+        col_a, col_b = st.columns([1, 3])
         with col_a:
             if st.button("Apply to this player", key=f"apply_{idx}"):
-                val = (img_input if 'img_input' in locals() else '')
-                val = (val or '').strip()
+                val = (img_input or "").strip()
                 if not val:
                     st.error("Please paste an image URL.")
                 elif not (val.startswith("http://") or val.startswith("https://")):
@@ -605,9 +593,8 @@ st.header("Advanced Individual Player Analysis (Feature Z)")
 # lazy imports so the app paints fast
 import matplotlib.pyplot as plt
 from matplotlib.transforms import ScaledTranslation
-from matplotlib import font_manager as fm
 from matplotlib.font_manager import FontProperties
-from PIL import Image
+from PIL import Image  # noqa: F401 (imported for parity with original)
 
 # Player picker (defaults to best match)
 left, right = st.columns([2,2])
@@ -721,10 +708,6 @@ sections = [("Attacking",ATTACKING),("Defensive",DEFENSIVE),("Possession",POSSES
 sections = [(t,lst) for t,lst in sections if lst]
 
 # ---------- drawing (same as original Feature Z) ----------
-import matplotlib.pyplot as plt
-from matplotlib.transforms import ScaledTranslation
-from matplotlib.font_manager import FontProperties
-
 def _font_name_or_fallback(pref, fallback="DejaVu Sans"):
     from matplotlib import font_manager as fm
     installed = {f.name for f in fm.fontManager.ttflist}
@@ -752,7 +735,6 @@ gutter = 0.215
 BAR_FRAC = 0.92
 
 TAB_RED=np.array([199,54,60]); TAB_GOLD=np.array([240,197,106]); TAB_GREEN=np.array([61,166,91])
-
 def pct_to_rgb(v):
     v=float(np.clip(v,0,100))
     def _blend(c1,c2,t): c=c1+(c2-c1)*np.clip(t,0,1); return f"#{int(c[0]):02x}{int(c[1]):02x}{int(c[2]):02x}"
@@ -767,7 +749,6 @@ fig.text(LEFT, 1 - TOP - 0.010, f"{name_}\u2009|\u2009{team}",
          ha="left", va="top", color=TITLE_C, fontproperties=TITLE_FP)
 
 # Info rows
-
 def draw_pairs_line(pairs_line, y):
     x = LEFT; renderer = fig.canvas.get_renderer()
     for i,(lab,val) in enumerate(pairs_line):
@@ -791,7 +772,6 @@ fig.lines.append(plt.Line2D([LEFT, 1 - RIGHT],[1 - TOP - header_block_h + 0.004]
                             transform=fig.transFigure, color=DIVIDER, lw=0.8, alpha=0.35))
 
 # Panels
-
 def draw_panel(panel_top, title, tuples, *, show_xticks=False, draw_bottom_divider=True):
     n = len(tuples)
     if n == 0: return panel_top
@@ -852,7 +832,6 @@ def draw_panel(panel_top, title, tuples, *, show_xticks=False, draw_bottom_divid
                                     color=DIVIDER, lw=1.2, alpha=0.35))
     return (panel_top - header_h - n * row_slot) - GAP
 
-
 # draw all sections
 y_top = 1 - TOP - header_block_h
 for sec_idx, (sec_title, sec_data) in enumerate(sections):
@@ -882,6 +861,7 @@ st.download_button(
 # cleanup
 import matplotlib.pyplot as _plt_cleanup
 _plt_cleanup.close(fig)
+
 
 
 
