@@ -592,90 +592,46 @@ st.download_button(
 import matplotlib.pyplot as _plt_cleanup
 _plt_cleanup.close(fig)
 
-# ======================== BUILD CONTEXT FOR AI REPORT ========================
-# Create summary dictionaries used in the prompt
-
-player_summary = {
-    "Name": name_,
-    "Age": age,
-    "Team": team,
-    "League": _safe_get(player_row, "League", "—"),
-    "Position": pos,
-    "Foot": foot_display,
-    "Height": height_text if (show_height and height_text) else "—",
-    "Minutes": minutes,
-    "Goals": goals,
-    "Assists": assists,
-    "Role Fit Score": float(
-        ranked.loc[ranked["Player"].astype(str) == str(name_), "Role Fit Score"]
-        .head(1)
-        .fillna(0)
-        .values[0]
-    )
-    if "Role Fit Score" in ranked.columns
-    else None,
-    "Template League": template_league,
-    "Template Team": template_team,
-}
-
-role_metrics = {
-    m: (round(float(player_row[m].iloc[0]), 2) if m in player_row else None)
-    for m in TEMPLATE_METRICS
-    if m in player_row
-}
-
-def safe_pct(col):
-    try:
-        p = pct_series(col)
-        return None if p is None or np.isnan(p) else round(float(p), 1)
-    except Exception:
-        return None
-
-percentiles = {
-    "Non-penalty goals per 90": safe_pct("Non-penalty goals per 90"),
-    "xG per 90": safe_pct("xG per 90"),
-    "Dribbles per 90": safe_pct("Dribbles per 90"),
-    "Aerial duels per 90": safe_pct("Aerial duels per 90"),
-    "Passes per 90": safe_pct("Passes per 90"),
-    "Accurate passes, %": safe_pct("Accurate passes, %"),
-}
-
 # ======================== FREE AI SCOUTING REPORT via HUGGING FACE ========================
 st.markdown("---")
 st.header("🧠 AI Scouting Report (Free Model)")
 
-include_online = st.checkbox("Include recent news context", value=False)  # set False if you haven't wired news yet
+include_online = st.checkbox("Include recent news context", value=False)
 lookback_days = st.slider("Look-back (days)", 3, 60, 21, disabled=not include_online)
 
 import requests, json, time
 
-# 1) Public, ungated model candidates (ordered by quality/speed for free tier)
+# Ungated, public candidates first (should not 404)
 HF_MODEL_CANDIDATES = [
-    "HuggingFaceH4/zephyr-7b-beta",                # strong 7B instruct (public)
-    "microsoft/phi-3-mini-4k-instruct",            # tiny but very reliable
-    "tiiuae/falcon-7b-instruct",                   # classic fallback
-    "Qwen/Qwen2.5-7B-Instruct",                    # public recent model
+    "HuggingFaceH4/zephyr-7b-beta",            # strong 7B instruct, public
+    "microsoft/phi-3-mini-4k-instruct",        # very reliable, public (may require license accept once)
+    "TinyLlama/TinyLlama-1.1B-Chat-v1.0",      # always public, smaller
+    "google/flan-t5-large",                    # text2text model, public
+    "tiiuae/falcon-7b-instruct",               # classic fallback
 ]
 
 HF_HEADERS = {"Authorization": f"Bearer {st.secrets.get('HF_API_KEY', '')}"}
 
 def _hf_generate_once(model_id: str, prompt: str, timeout_s: int = 120):
     url = f"https://api-inference.huggingface.co/models/{model_id}"
-    # Plain text generation payload (works across most chat-tuned models)
-    payload = {"inputs": prompt}
+    payload = {"inputs": prompt, "parameters": {"max_new_tokens": 700, "temperature": 0.6, "return_full_text": False}}
     r = requests.post(url, headers=HF_HEADERS, json=payload, timeout=timeout_s)
-    # 503 often means "loading" on the free tier — bubble it up to retry
     if r.status_code in (503, 524):
         raise RuntimeError("Model loading, retry")
     r.raise_for_status()
     data = r.json()
-    # Two common response shapes:
-    #   [{"generated_text": "..."}]  or   {"generated_text": "..."}  or token streams
+
+    # Common shapes:
+    # 1) [{"generated_text": "..."}]
     if isinstance(data, list) and data and isinstance(data[0], dict) and "generated_text" in data[0]:
         return data[0]["generated_text"]
+    # 2) {"generated_text": "..."}
     if isinstance(data, dict) and "generated_text" in data:
         return data["generated_text"]
-    # Fallback: many inference servers return raw text inside 'data'
+    # 3) flan-t5 returns [{"generated_text": "..."}] or [{"summary_text": "..."}]
+    if isinstance(data, list) and data and "summary_text" in data[0]:
+        return data[0]["summary_text"]
+    # Fallback: stringify whatever came back so you can see it
     return json.dumps(data, indent=2)
 
 def hf_generate_with_fallback(prompt: str):
@@ -684,25 +640,23 @@ def hf_generate_with_fallback(prompt: str):
         try:
             with st.spinner(f"Contacting Hugging Face ({model_id})…"):
                 txt = _hf_generate_once(model_id, prompt)
-                st.caption(f"Model: {model_id}")
+                st.caption(f"Model used: **{model_id}**")
                 return txt
         except requests.HTTPError as e:
-            # 404 = not found/gated; 401 = token issue; 429 = too many requests; 5xx = backend
             code = getattr(e.response, "status_code", "?")
+            # 404 usually = gated or not served; 401 = token; 429 = rate; 5xx = backend
             st.info(f"Skipping {model_id} (HTTP {code}).")
             last_err = e
             continue
         except Exception as e:
-            # timeouts / loading / transient
             st.info(f"Retrying with next model ({model_id} failed: {e}).")
             last_err = e
             time.sleep(1.2)
             continue
-    # If we got here, all failed
     st.error(f"All Hugging Face candidates failed. Last error: {last_err}")
     st.stop()
 
-# ---------- build the same structured prompt you already use ----------
+# ---------- your existing structured prompt ----------
 sections_req = """Include:
 - Executive summary
 - Technical profile (finishing, first touch, aerial, ball-carrying, passing/retention)
@@ -732,3 +686,4 @@ with st.spinner("Generating scouting report (free model)…"):
     report = hf_generate_with_fallback(prompt)
 
 st.markdown(report)
+
