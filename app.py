@@ -469,7 +469,8 @@ for idx, row in ranked.head(int(top_n)).iterrows():
     key_id = f"{name}|||{team}|||{league}"
     fm_id = st.session_state["fotmob_map"].get(key_id, "")
     if fm_id:
-        avatar_url = FOTMOB_URL(fm_id)
+        # cache-bust the browser so the new image shows immediately
+        avatar_url = FOTMOB_URL(fm_id) + f"?t={int(time.time())}"
     else:
         avatar_url = playmakerstats_image_by_name_team(name, team) or PLACEHOLDER_IMG
 
@@ -575,12 +576,18 @@ for idx, row in ranked.head(int(top_n)).iterrows():
         col_a, col_b = st.columns([1,3])
         with col_a:
             if st.button("Apply to this player", key=f"apply_{idx}"):
-                st.session_state["fotmob_map"][key_id] = fm_input.strip()
-                st.success("Saved. Rerun to refresh the avatar.")
+                val = fm_input.strip()
+                if not val.isdigit():
+                    st.error("Please enter a numeric FotMob ID.")
+                else:
+                    st.session_state["fotmob_map"][key_id] = val
+                    st.success("Saved!")
+                    st.rerun()
         with col_b:
             if st.button("Clear override", key=f"clear_{idx}"):
                 st.session_state["fotmob_map"].pop(key_id, None)
-                st.info("Cleared. Rerun to refresh the avatar.")
+                st.info("Cleared.")
+                st.rerun()
 
 # ======================== Feature Z (unchanged) ========================
 st.markdown("---")
@@ -852,6 +859,7 @@ st.download_button(
 )
 import matplotlib.pyplot as _plt_cleanup
 _plt_cleanup.close(fig)
+
 
 
 
