@@ -591,6 +591,164 @@ st.download_button(
 )
 import matplotlib.pyplot as _plt_cleanup; _plt_cleanup.close(fig)
 
+# ======================== AI SCOUTING REPORT (minimal, OpenAI + SerpAPI) ========================
+st.markdown("---")
+st.header("🧠 AI Scouting Report")
+
+include_online = st.checkbox("Include recent news context", value=True)
+lookback_days = st.slider("Look-back (days)", 3, 60, 21, disabled=not include_online)
+
+import json, re, datetime as dt, requests
+
+def _domain(url: str) -> str:
+    try:
+        return url.split("//",1)[-1].split("/",1)[0].replace("www.","")
+    except Exception:
+        return ""
+
+def fetch_serpapi_news(q: str, k: int = 6):
+    """Returns list[{title, snippet, url, source}] from Google News via SerpAPI."""
+    key = st.secrets.get("SERPAPI_API_KEY")
+    if not key:
+        return []
+    try:
+        r = requests.get(
+            "https://serpapi.com/search",
+            params={"engine":"google_news","q":q,"api_key":key,"hl":"en"},
+            timeout=10
+        )
+        r.raise_for_status()
+        out=[]
+        for itm in (r.json() or {}).get("news_results", [])[:k]:
+            out.append({
+                "title": itm.get("title") or "",
+                "snippet": (itm.get("snippet") or "").strip(),
+                "url": itm.get("link"),
+                "source": _domain(itm.get("link","")),
+                "date": itm.get("date") or itm.get("published") or ""
+            })
+        return out
+    except Exception:
+        return []
+
+# --- build player/context payload from your existing variables ---
+player_summary = {
+    "Name": name_,
+    "Age": age,
+    "Team": team,
+    "League": _safe_get(player_row, "League", "—"),
+    "Position": pos,
+    "Foot": foot_display,
+    "Height": height_text if (show_height and height_text) else "—",
+    "Minutes": minutes,
+    "Goals": goals,
+    "Assists": assists,
+    "Role Fit Score": float(ranked.loc[ranked["Player"].astype(str)==str(name_), "Role Fit Score"].head(1).fillna(0).values[0]) \
+                      if "Role Fit Score" in ranked.columns else None,
+    "Template league": template_league,
+    "Template team": template_team,
+}
+
+role_metrics = {
+    m: (round(float(player_row[m].iloc[0]), 2) if m in player_row else None)
+    for m in TEMPLATE_METRICS if m in player_row
+}
+
+def safe_pct(col):
+    try:
+        p = pct_series(col)
+        return None if p is None or np.isnan(p) else round(float(p), 1)
+    except Exception:
+        return None
+
+percentiles = {
+    "Non-penalty goals per 90": safe_pct("Non-penalty goals per 90"),
+    "xG per 90": safe_pct("xG per 90"),
+    "Dribbles per 90": safe_pct("Dribbles per 90"),
+    "Aerial duels per 90": safe_pct("Aerial duels per 90"),
+    "Passes per 90": safe_pct("Passes per 90"),
+    "Accurate passes, %": safe_pct("Accurate passes, %"),
+}
+
+# --- optional online snippets (short, high-quality) ---
+web_context = ""
+citations = []
+if include_online:
+    q1 = f"\"{name_}\" {team} striker"
+    q2 = f"\"{name_}\" transfer"
+    q3 = f"\"{name_}\" injury"
+    items = fetch_serpapi_news(q1, 4) + fetch_serpapi_news(q2, 2) + fetch_serpapi_news(q3, 2)
+
+    # light recency filter + dedupe by URL/title
+    earliest = dt.datetime.utcnow() - dt.timedelta(days=int(lookback_days))
+    seen = set(); curated=[]
+    for it in items:
+        key = (it.get("url") or "")[:120]
+        title_norm = re.sub(r"[^a-z0-9]+","", (it.get("title","")).lower())
+        if key in seen or title_norm in seen: 
+            continue
+        seen.add(key); seen.add(title_norm)
+        curated.append(it)
+    citations = curated[:6]
+
+    lines=[]
+    for i, it in enumerate(citations, 1):
+        title = it.get("title","")
+        snippet = (it.get("snippet","") or "").strip()
+        url = it.get("url","")
+        lines.append(f"[{i}] {title}\n{snippet}\nURL: {url}")
+    web_context = "\n\n".join(lines)
+
+# --- LLM prompt ---
+sections_req = """Include:
+- Executive summary (one paragraph)
+- Technical profile (finishing, first touch, aerial, ball-carrying, passing/retention)
+- Tactical fit (box movement, link-up play, pressing behaviours)
+- Development & projection (risks, teachables, upside)
+- Suitability for higher tiers/leagues given current league strength and role fit
+Use online snippets only if provided and cite them as [n]. 500–1000 words.
+"""
+
+prompt = f"""
+You are an elite football data scout. Write a professional scouting report grounded in the quantitative profile
+AND (if provided) the reputable online context below. Avoid speculation and clichés.
+
+PLAYER:
+{json.dumps(player_summary, ensure_ascii=False)}
+
+ROLE METRICS:
+{json.dumps(role_metrics, ensure_ascii=False)}
+
+KEY PERCENTILES (vs candidate pool):
+{json.dumps(percentiles, ensure_ascii=False)}
+
+ONLINE CONTEXT (optional, cite with [n]):
+{web_context if web_context else "(none)"}
+
+{sections_req}
+"""
+
+with st.spinner("Generating AI scouting report…"):
+    from openai import OpenAI
+    client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+    resp = client.chat.completions.create(
+        model="gpt-5",
+        messages=[
+            {"role":"system","content":"You are a professional football scout producing rigorous, sourced reports."},
+            {"role":"user","content": prompt},
+        ],
+        temperature=0.6,
+        max_tokens=1400,
+    )
+    report = (resp.choices[0].message.content or "").strip()
+
+st.markdown(report)
+
+# show sources when used
+if include_online and citations:
+    st.subheader("Sources")
+    for i, c in enumerate(citations, 1):
+        st.markdown(f"[{i}] **{c.get('title','').strip()}** — {_domain(c.get('url',''))}  \n{c.get('url')}")
 
 
 
