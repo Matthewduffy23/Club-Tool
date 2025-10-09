@@ -17,7 +17,7 @@ st.set_page_config(page_title="Advanced CF Scouting — Role Fit Tiles", layout=
 st.title("🔎 Advanced CF Scouting — Role Fit Tiles")
 st.caption(
     "Role-template matching blended with league strength. Ranked by **Fit %**. "
-    "Click each player to expand detailed metrics. Original tile layout kept (3 role pills), and the top-right label now shows **Fit %**."
+    "Click each player to expand detailed metrics."
 )
 
 # ======================== CSV loader ========================
@@ -174,22 +174,6 @@ with st.sidebar:
     )
 
     top_n = st.number_input("How many tiles", 5, 100, 20, 5)
-
-# ===== Metric filters (percentiles) =====
-with st.expander("Metric filters (percentile 0–99)", expanded=False):
-    st.write("Set minimum/maximum percentile thresholds per metric. Applied within each league.")
-    # Define which metrics get filters (use dropdown feature set by default)
-    FILTER_METRICS = [
-        'Non-penalty goals per 90','xG per 90','Shots per 90','Shots on target, %','Goal conversion, %',
-        'Touches in box per 90','Progressive runs per 90','Dribbles per 90','Successful dribbles, %',
-        'Passes per 90','Accurate passes, %','Key passes per 90','xA per 90','Passes to penalty area per 90','Accurate passes to penalty area, %',
-        'Deep completions per 90','Smart passes per 90','Aerial duels per 90','Aerial duels won, %','Defensive duels per 90','Defensive duels won, %','PAdj Interceptions'
-    ]
-    # Keep only those present
-    FILTER_METRICS = [m for m in FILTER_METRICS if m in df.columns]
-    metric_filters = {}
-    for m in FILTER_METRICS:
-        metric_filters[m] = st.slider(m, 0, 99, (0, 99), key=f"mf_{m}")
 
 # ======================== candidate pool (affected by sidebar) ========================
 df_pool = df[df["League"].isin(leagues_sel)].copy()
@@ -353,40 +337,6 @@ DROPDOWN_FEATURES = [c for c in DROPDOWN_FEATURES if c in df_pool.columns]
 for feat in DROPDOWN_FEATURES:
     df_pool[feat] = pd.to_numeric(df_pool[feat], errors="coerce")
     df_pool[f"{feat} Percentile"] = df_pool.groupby("League")[feat].transform(lambda x: x.rank(pct=True) * 100.0)
-
-# Apply metric percentile filters (if any were created)
-if 'metric_filters' in locals() and metric_filters:
-    for met, (lo, hi) in metric_filters.items():
-        colp = f"{met} Percentile"
-        if colp in df_pool.columns:
-            df_pool = df_pool[(df_pool[colp] >= lo) & (df_pool[colp] <= hi)]
-
-# If filtering removed everyone, stop early
-if df_pool.empty:
-    st.warning("No players after metric percentile filters. Loosen thresholds.")
-    st.stop()
-
-# ====================== Compute role sub-scores for pills (original layout) ======================
-ROLES = {
-    'Goal Threat CF': {'metrics':{'Non-penalty goals per 90':3,'Shots per 90':1.5,'xG per 90':3,'Touches in box per 90':1,'Shots on target, %':0.5}},
-    'Link-Up CF':     {'metrics':{'Passes per 90':2,'Passes to penalty area per 90':1.5,'Deep completions per 90':1,'Smart passes per 90':1.5,
-                                  'Accurate passes, %':1.5,'Key passes per 90':1,'Dribbles per 90':2,'Successful dribbles, %':1,
-                                  'Progressive runs per 90':2,'xA per 90':3}},
-    'Target Man CF':  {'metrics':{'Aerial duels won, %':4,'Aerial duels per 90':3}},
-}
-
-def role_score(df_in:pd.DataFrame,metrics:dict)->pd.Series:
-    total_w=sum(metrics.values()) if metrics else 1.0
-    wsum=np.zeros(len(df_in))
-    for m,w in metrics.items():
-        col=f"{m} Percentile"
-        if col in df_in.columns: wsum+=df_in[col].values*w
-    return wsum/total_w
-
-# role scores (league weighting optional via beta used for Fit %, but here we keep pure percentiles)
-df_pool["Score_GT"] = role_score(df_pool, ROLES['Goal Threat CF']['metrics'])
-df_pool["Score_LU"] = role_score(df_pool, ROLES['Link-Up CF']['metrics'])
-df_pool["Score_TM"] = role_score(df_pool, ROLES['Target Man CF']['metrics'])
 
 # ====================== UI helpers (tiles) ======================
 st.markdown("""
@@ -747,6 +697,7 @@ with st.sidebar:
         mime="text/csv",
         key=f"download_topn_csv_{uuid.uuid4().hex}"
     )
+
 
 
 
