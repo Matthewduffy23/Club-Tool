@@ -562,16 +562,19 @@ for idx, row in ranked.head(int(top_n)).iterrows():
         )
         st.markdown(col_html, unsafe_allow_html=True)
 
-        # --- Custom image URL override ---
+        # --- Custom image URL override (stable key!) ---
+        img_key = f"imgurl_{key_id}"  # stable across reruns
+        default_url = st.session_state.get("photo_map", {}).get(key_id, "")
         img_input = st.text_input(
-            "Custom image URL (override avatar — e.g., https://cdn.site/player.png)",
-            value=st.session_state.get("photo_map", {}).get(key_id, ""),
-            key=f"img_{idx}_{uuid.uuid4().hex[:6]}"
+            "Custom image URL (override avatar — e.g., https://images.fotmob.com/image_resources/playerimages/1199383.png)",
+            value=default_url,
+            key=img_key
         )
+
         col_a, col_b = st.columns([1, 3])
         with col_a:
-            if st.button("Apply to this player", key=f"apply_{idx}"):
-                val = (img_input or "").strip()
+            if st.button("Apply to this player", key=f"apply_{key_id}"):
+                val = (st.session_state.get(img_key, "") or "").strip()
                 if not val:
                     st.error("Please paste an image URL.")
                 elif not (val.startswith("http://") or val.startswith("https://")):
@@ -579,12 +582,20 @@ for idx, row in ranked.head(int(top_n)).iterrows():
                 else:
                     st.session_state.setdefault("photo_map", {})[key_id] = val
                     st.success("Saved!")
-                    st.rerun()
+                    try:
+                        st.rerun()
+                    except Exception:
+                        st.experimental_rerun()  # for older Streamlit
+
         with col_b:
-            if st.button("Clear override", key=f"clear_{idx}"):
+            if st.button("Clear override", key=f"clear_{key_id}"):
                 st.session_state["photo_map"].pop(key_id, None)
                 st.info("Cleared.")
-                st.rerun()
+                try:
+                    st.rerun()
+                except Exception:
+                    st.experimental_rerun()  # for older Streamlit
+
 
 # ======================== Feature Z (unchanged) ========================
 st.markdown("---")
