@@ -589,7 +589,56 @@ st.download_button(
     mime="image/png",
     key=f"download_feature_z_{uuid.uuid4().hex}"
 )
-import matplotlib.pyplot as _plt_cleanup; _plt_cleanup.close(fig)
+import matplotlib.pyplot as _plt_cleanup
+_plt_cleanup.close(fig)
+
+# ======================== BUILD CONTEXT FOR AI REPORT ========================
+# Create summary dictionaries used in the prompt
+
+player_summary = {
+    "Name": name_,
+    "Age": age,
+    "Team": team,
+    "League": _safe_get(player_row, "League", "—"),
+    "Position": pos,
+    "Foot": foot_display,
+    "Height": height_text if (show_height and height_text) else "—",
+    "Minutes": minutes,
+    "Goals": goals,
+    "Assists": assists,
+    "Role Fit Score": float(
+        ranked.loc[ranked["Player"].astype(str) == str(name_), "Role Fit Score"]
+        .head(1)
+        .fillna(0)
+        .values[0]
+    )
+    if "Role Fit Score" in ranked.columns
+    else None,
+    "Template League": template_league,
+    "Template Team": template_team,
+}
+
+role_metrics = {
+    m: (round(float(player_row[m].iloc[0]), 2) if m in player_row else None)
+    for m in TEMPLATE_METRICS
+    if m in player_row
+}
+
+def safe_pct(col):
+    try:
+        p = pct_series(col)
+        return None if p is None or np.isnan(p) else round(float(p), 1)
+    except Exception:
+        return None
+
+percentiles = {
+    "Non-penalty goals per 90": safe_pct("Non-penalty goals per 90"),
+    "xG per 90": safe_pct("xG per 90"),
+    "Dribbles per 90": safe_pct("Dribbles per 90"),
+    "Aerial duels per 90": safe_pct("Aerial duels per 90"),
+    "Passes per 90": safe_pct("Passes per 90"),
+    "Accurate passes, %": safe_pct("Accurate passes, %"),
+}
 
 # ======================== FREE AI SCOUTING REPORT via HUGGING FACE ========================
 st.markdown("---")
@@ -600,13 +649,12 @@ lookback_days = st.slider("Look-back (days)", 3, 60, 21, disabled=not include_on
 
 import requests, json, datetime as dt, re
 
-# Hugging Face Inference API
 HF_API_URL = "https://api-inference.huggingface.co/models/mistralai/Mixtral-8x7B-Instruct-v0.1"
 HEADERS = {"Authorization": f"Bearer {st.secrets.get('HF_API_KEY', '')}"}
 
 def generate_report_hf(prompt: str) -> str:
     try:
-        r = requests.post(HF_API_URL, headers=HEADERS, json={"inputs": prompt}, timeout=60)
+        r = requests.post(HF_API_URL, headers=HEADERS, json={"inputs": prompt}, timeout=120)
         r.raise_for_status()
         data = r.json()
         if isinstance(data, list) and len(data) > 0 and "generated_text" in data[0]:
@@ -616,7 +664,6 @@ def generate_report_hf(prompt: str) -> str:
         st.error(f"Hugging Face request failed: {e}")
         st.stop()
 
-# --- same prompt construction as before ---
 sections_req = """Include:
 - Executive summary
 - Technical profile (finishing, first touch, aerial, ball-carrying, passing/retention)
@@ -627,7 +674,8 @@ sections_req = """Include:
 """
 
 prompt = f"""
-You are a professional football scout. Write a scouting report grounded in these metrics.
+You are a professional football scout. Write a detailed, data-driven scouting report
+based on the following player information and metrics.
 
 PLAYER:
 {json.dumps(player_summary, ensure_ascii=False)}
