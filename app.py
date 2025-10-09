@@ -1,9 +1,11 @@
-# app.py — CF Role Template Scouting + League→Team template flow
-# Defaults: (1) League blend β ON at 0.40, (2) Use single template player = OFF
-# Stronger league-quality influence inside distance via spread-scaled additive penalty (toggleable)
+# app_rolefit_tiles.py — Role Fit Tiles (CF) with Dropdowns
+# Combines: (A) Role-template matching & league-adjusted scoring + (B) rich Top-N tiles UI with per-player dropdown metrics.
+# Defaults: League blend β ON at 0.40; league-mismatch penalty inside distance ON (α=1.20, p=1.50, Additive).
+# Requirements: streamlit, pandas, numpy, requests, pillow, matplotlib
 
-import io, math, uuid
+import io, re, math, json, time, unicodedata, uuid
 from pathlib import Path
+from urllib.parse import quote
 
 import numpy as np
 import pandas as pd
@@ -11,11 +13,11 @@ import streamlit as st
 from numpy.linalg import norm
 from numpy import exp
 
-st.set_page_config(page_title="Club Striker Scouting System", layout="wide")
-st.title("🔎 Advanced Club ST Scouting System")
+st.set_page_config(page_title="Advanced CF Scouting — Role Fit Tiles", layout="wide")
+st.title("🔎 Advanced CF Scouting — Role Fit Tiles")
 st.caption(
-    "Club Selection "
-    "Individual player specific or generalized role"
+    "Role-template matching blended with league strength. Ranked by **Fit %**. "
+    "Click each player to expand detailed metrics."
 )
 
 # ======================== CSV loader ========================
@@ -92,18 +94,18 @@ LEAGUE_STRENGTHS = {
 }
 
 # ======================== schema & coercions ========================
-FEATURES = [
+ROLE_FEATURES = [
     'Touches in box per 90','xG per 90','Dribbles per 90','Progressive runs per 90',
     'Aerial duels per 90','Aerial duels won, %','Passes per 90','Non-penalty goals per 90','Accurate passes, %'
 ]
 REQUIRED_BASE = {"Player","Team","League","Age","Position","Minutes played","Market value","Goals"}
-need = set(FEATURES) | REQUIRED_BASE
+need = set(ROLE_FEATURES) | REQUIRED_BASE
 miss = [c for c in need if c not in df.columns]
 if miss:
     st.error(f"Dataset missing required columns: {miss}")
     st.stop()
 
-for c in ["Minutes played","Age","Market value","Goals"] + FEATURES:
+for c in ["Minutes played","Age","Market value","Goals"] + ROLE_FEATURES:
     df[c] = pd.to_numeric(df[c], errors="coerce")
 
 # ======================== sidebar: candidate pool filters ========================
@@ -160,7 +162,6 @@ with st.sidebar:
         "Penalise league mismatch inside distance (α, p)", value=True,
         help="Adds a distance-penalty based on |candidate league − template league|."
     )
-    # Wider max and higher default so it *matters*
     alpha = st.slider("League mismatch weight α", 0.0, 5.0, 1.20, 0.05,
                       help="Scales mismatch; combined with distance spread for real impact.")
     p_exp = st.slider("League mismatch exponent p", 1.0, 3.0, 1.50, 0.10,
@@ -172,20 +173,20 @@ with st.sidebar:
         help="Additive: base + scaled penalty (strong). Quadrature: sqrt(base^2 + penalty^2) (gentler)."
     )
 
-    top_n = st.number_input("Top N (table)", 5, 200, 50, 5)
+    top_n = st.number_input("How many tiles", 5, 100, 20, 5)
 
 # ======================== candidate pool (affected by sidebar) ========================
 df_pool = df[df["League"].isin(leagues_sel)].copy()
 df_pool = df_pool[df_pool["Position"].apply(position_filter)]
 df_pool = df_pool[df_pool["Minutes played"].between(min_minutes, max_minutes)]
 df_pool = df_pool[df_pool["Age"].between(min_age, max_age)]
-df_pool = df_pool[df_pool["Market value"].between(pool_min_value, pool_max_value)]
 df_pool["League Strength"] = df_pool["League"].map(LEAGUE_STRENGTHS).fillna(0.0)
 df_pool = df_pool[
     (df_pool["League Strength"] >= float(min_strength)) &
     (df_pool["League Strength"] <= float(max_strength))
 ]
-df_pool = df_pool.dropna(subset=FEATURES)
+df_pool = df_pool[df_pool["Market value"].between(pool_min_value, pool_max_value)]
+df_pool = df_pool.dropna(subset=ROLE_FEATURES)
 
 if df_pool.empty:
     st.warning("No players in candidate pool after filters. Loosen filters.")
@@ -193,7 +194,7 @@ if df_pool.empty:
 
 # ======================== template (RAW df, unaffected by pool filters) ========================
 st.markdown("---")
-st.header("🎯 Club Selection")
+st.header("🎯 Club / Team Role Template")
 
 template_league_list = sorted([str(x) for x in df["League"].dropna().unique()])
 template_league = st.selectbox("Template league (scopes team list)", template_league_list)
@@ -205,7 +206,6 @@ template_team = st.selectbox("Template team", templ_teams)
 
 min_minutes_template = st.slider("Minimum minutes for template CFs", 0, 6000, 1000, 100)
 
-# DEFAULT: Use single template player OFF
 use_single_template_player = st.checkbox("Use single player only (else avg of team CFs)", False)
 
 tmpl_pos_ok = lambda p: str(p).strip().upper().startswith("CF")
@@ -214,7 +214,7 @@ df_template_source = df[
     (df["Team"].astype(str) == template_team) &
     (df["Position"].apply(tmpl_pos_ok)) &
     (pd.to_numeric(df["Minutes played"], errors="coerce") >= min_minutes_template)
-].copy().dropna(subset=FEATURES)
+].copy().dropna(subset=ROLE_FEATURES)
 
 players_in_team_raw = sorted(df_template_source["Player"].dropna().astype(str).unique())
 template_player_name = st.selectbox(
@@ -269,6 +269,7 @@ if cf_pool.empty:
     st.stop()
 
 # --- First compute BASE distance (without penalty) to know its spread ---
+
 def base_row_dist(row):
     return norm([
         row['Opportunities']      - template_vector['Opportunities'],
@@ -283,6 +284,7 @@ cf_pool["_base_dist"] = cf_pool.apply(base_row_dist, axis=1)
 base_min, base_max = float(cf_pool["_base_dist"].min()), float(cf_pool["_base_dist"].max())
 base_rng = max(1e-9, base_max - base_min)  # spread used to scale penalty so it has teeth
 
+
 def row_dist(row):
     base = row["_base_dist"]
     if not use_league_mismatch:
@@ -290,13 +292,12 @@ def row_dist(row):
 
     ls_cand = float(LEAGUE_STRENGTHS.get(str(row['League']), 0.0))   # 0–100
     delta = abs(ls_cand - template_strength) / 100.0                 # 0–1
-    # scale penalty by the spread of base distances so it matters across datasets
     scaled_penalty = alpha * (delta ** p_exp) * base_rng
 
     if penalty_mode.startswith("Additive"):
-        return base + scaled_penalty                 # STRONGER
+        return base + scaled_penalty
     else:
-        return math.sqrt(base*base + scaled_penalty*scaled_penalty)  # gentler
+        return math.sqrt(base*base + scaled_penalty*scaled_penalty)
 
 cf_pool["Role Fit Distance"] = cf_pool.apply(row_dist, axis=1)
 
@@ -308,286 +309,394 @@ if rng <= 1e-12:
 else:
     base_score = 100.0 * exp(-decay_rate * ((cf_pool["Role Fit Distance"] - min_d) / rng))
 
-# league weighting (candidate league only) — optional blend (DEFAULT ON @ β=0.4)
+# league weighting (candidate league only)
 if use_league_weighting:
     league_part = cf_pool["League"].map(LEAGUE_STRENGTHS).fillna(0.0)  # 0–100 scale
 else:
     league_part = 0.0
 
-cf_pool["Role Fit Score"] = (1.0 - beta) * base_score + beta * league_part
-ranked = cf_pool.sort_values("Role Fit Score", ascending=False).reset_index(drop=True)
+cf_pool["Fit %"] = (1.0 - beta) * base_score + beta * league_part
+ranked = cf_pool.sort_values("Fit %", ascending=False).reset_index(drop=True)
 
 st.markdown("---")
-st.header("🏅 Top Role Matches")
-st.dataframe(
-    ranked[["Player","Team","League","Age","Minutes played","Market value","Role Fit Score"]].head(int(top_n)),
-    use_container_width=True
-)
+st.header("🏅 Top Role Fits — Tiles")
 
-# ======================== Feature Z (under the table) ========================
-st.markdown("---")
-st.header("Advanced Individual Player Analysis")
+# ====================== Percentiles for dropdowns ======================
+# We compute percentile ranks league-wise to keep context fair.
+DROPDOWN_FEATURES = [
+    'Defensive duels per 90','Defensive duels won, %','Aerial duels per 90','Aerial duels won, %','PAdj Interceptions',
+    'Non-penalty goals per 90','xG per 90','Shots per 90','Shots on target, %','Goal conversion, %','Crosses per 90',
+    'Accurate crosses, %','Dribbles per 90','Successful dribbles, %','Head goals per 90','Key passes per 90',
+    'Touches in box per 90','Progressive runs per 90','Accelerations per 90','Passes per 90','Accurate passes, %',
+    'xA per 90','Passes to penalty area per 90','Accurate passes to penalty area, %','Deep completions per 90','Smart passes per 90',
+    'Offensive duels per 90','Offensive duels won, %'
+]
 
-# lazy imports so the app paints fast
-import matplotlib.pyplot as plt
-from matplotlib.transforms import ScaledTranslation
-from matplotlib import font_manager as fm
-from matplotlib.font_manager import FontProperties
-from PIL import Image
+# Only keep features that exist in df_pool
+DROPDOWN_FEATURES = [c for c in DROPDOWN_FEATURES if c in df_pool.columns]
+for feat in DROPDOWN_FEATURES:
+    df_pool[feat] = pd.to_numeric(df_pool[feat], errors="coerce")
+    df_pool[f"{feat} Percentile"] = df_pool.groupby("League")[feat].transform(lambda x: x.rank(pct=True) * 100.0)
 
-# Player picker (defaults to best match)
-left, right = st.columns([2,2])
-with left:
-    options_ranked = ranked["Player"].astype(str).head(int(top_n)).tolist()
-    any_pool = st.checkbox("Pick from entire candidate pool (not just Top N)", value=False)
-    options = sorted(df_pool["Player"].dropna().astype(str).unique()) if any_pool else options_ranked
-    if not options:
-        st.info("No players available for Feature Z. Adjust filters.")
-        st.stop()
-    player_sel = st.selectbox("Choose player for Feature Z", options, index=0)
+# ====================== UI helpers (tiles) ======================
+st.markdown("""
+<style>
+  :root { --bg:#0f1115; --card:#161a22; --muted:#a8b3cf; --soft:#202633; }
+  .block-container { padding-top:.8rem; }
+  body{ background:var(--bg); font-family: system-ui,-apple-system,'Segoe UI','Segoe UI Emoji',Roboto,Helvetica,Arial,sans-serif;}
+  .wrap{ display:flex; justify-content:center; }
+  .player-card{
+    width:min(420px,96%); display:grid; grid-template-columns:96px 1fr 64px;
+    gap:12px; align-items:start; background:var(--card); border:1px solid #252b3a;
+    border-radius:18px; padding:16px;
+  }
+  .avatar{
+    width:96px; height:96px; border-radius:12px;
+    background-color:#0b0d12; background-size:cover; background-position:center;
+    border:1px solid #2a3145;
+  }
+  .leftcol{ display:flex; flex-direction:column; align-items:center; gap:8px; }
+  .name{ font-weight:800; font-size:22px; color:#e8ecff; margin-bottom:6px; }
+  .sub{ color:#a8b3cf; font-size:15px; }
+  .pill{ padding:2px 10px; border-radius:9px; font-weight:800; font-size:18px; color:#0b0d12; display:inline-block; min-width:42px; text-align:center; }
+  .row{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:4px 0; }
+  .chip{ background:var(--soft); color:#cbd5f5; border:1px solid #2d3550; padding:3px 10px; border-radius:10px; font-size:13px; line-height:18px; }
+  .flagchip{ display:inline-flex; align-items:center; gap:6px; background:var(--soft); color:#cbd5f5; border:1px solid #2d3550; padding:2px 8px; border-radius:10px; font-size:13px; height:22px;}
+  .flagchip img{ width:18px; height:14px; border-radius:2px; display:block; }
+  .pos{ color:#eaf0ff; font-weight:700; padding:4px 10px; border-radius:10px; font-size:12px; border:1px solid rgba(255,255,255,.08); }
+  .teamline{ color:#e6ebff; font-size:15px; font-weight:400; margin-top:2px; }
+  .rank{ color:#94a0c6; font-weight:800; font-size:18px; text-align:right; }
+  .divider{ height:12px; }
 
-with right:
-    show_height = st.checkbox("Show height in info row", value=True)
-    foot_override_on = st.checkbox("Edit foot value", value=False)
-    foot_override_text = st.text_input("Foot (e.g., Left)", value="", disabled=not foot_override_on)
-    name_override_on = st.checkbox("Edit display name", value=False)
-    name_override = st.text_input("Display name", "", disabled=not name_override_on)
-    footer_caption_text = st.text_input("Footer caption", "Percentile Rank")
+  .metric-section{ background:#121621; border:1px solid #242b3b; border-radius:14px; padding:10px 12px; }
+  .m-title{ color:#e8ecff; font-weight:800; letter-spacing:.02em; margin:4px 0 10px 0; font-size:20px; text-transform:uppercase; }
+  .m-row{ display:flex; justify-content:space-between; align-items:center; padding:8px 8px; border-radius:10px; }
+  .m-row + .m-row{ margin-top:6px; }
+  .m-label{ color:#c9d3f2; font-size:16px; }
+  .m-right{ display:flex; align-items:center; gap:8px; }
+  .m-badge{ min-width:40px; text-align:center; padding:2px 10px; border-radius:8px; font-weight:800; font-size:18px; color:#0b0d12; border:1px solid rgba(0,0,0,.15); }
+  .metrics-grid{ display:grid; grid-template-columns:1fr; gap:12px; }
+  @media (min-width: 720px){ .metrics-grid{ grid-template-columns:repeat(3, 1fr); } }
+</style>
+""", unsafe_allow_html=True)
 
-# Build row for chosen player (from candidate pool so percentiles match context)
-player_row = df_pool[df_pool["Player"].astype(str) == str(player_sel)].head(1)
-if player_row.empty:
-    st.info("Pick a player above.")
-    st.stop()
+PALETTE=[(0,(208,2,27)),(50,(245,166,35)),(65,(248,231,28)),(75,(126,211,33)),(85,(65,117,5)),(100,(40,90,4))]
 
-# ---------- helpers ----------
-def _safe_get(sr, key, default="—"):
-    try:
-        v = sr.iloc[0].get(key, default)
-        s = "" if v is None else str(v)
-        return default if s.strip() == "" else s
-    except Exception:
-        return default
+def _lerp(a,b,t): return tuple(int(round(a[i]+(b[i]-a[i])*t)) for i in range(3))
 
-def pct_series(col: str) -> float:
-    vals = pd.to_numeric(df_pool[col], errors="coerce").dropna()
-    if vals.empty: return np.nan
-    v = pd.to_numeric(player_row.iloc[0][col], errors="coerce")
-    if pd.isna(v): return np.nan
-    return float((vals <= v).mean() * 100.0)
+def rating_color(v: float) -> str:
+    v=max(0.0,min(100.0,float(v)))
+    for i in range(len(PALETTE)-1):
+        x0,c0=PALETTE[i]; x1,c1=PALETTE[i+1]
+        if v<=x1:
+            t=0 if x1==x0 else (v-x0)/(x1-x0); r,g,b=_lerp(c0,c1,t); return f"rgb({r},{g},{b})"
+    r,g,b=PALETTE[-1][1]; return f"rgb({r},{g},{b})"
 
-def val_of(col: str):
-    v = player_row.iloc[0].get(col)
-    if pd.isna(v): return (np.nan, "—")
-    if isinstance(v, (int,float,np.floating)):
-        return (float(v), f"{float(v):.0f}%" if "%" in col else f"{float(v):.2f}")
-    return (v, str(v))
+POS_COLORS={
+    "CF":"#183153","LWF":"#1f3f8c","LW":"#1f3f8c","LAMF":"#1f3f8c","RW":"#1f3f8c","RWF":"#1f3f8c","RAMF":"#1f3f8c",
+    "AMF":"#87d37c","LCMF":"#2ecc71","RCMF":"#2ecc71","RDMF":"#0e7a3b","LDMF":"#0e7a3b",
+    "LWB":"#e7d000","RWB":"#e7d000","LB":"#ff8a00","RB":"#ff8a00","RCB":"#c45a00","CB":"#c45a00","LCB":"#c45a00",
+}
 
-# ---------- info row data ----------
-pos   = _safe_get(player_row, "Position", "CF")
-name_ = _safe_get(player_row, "Player", _safe_get(player_row, "Name", ""))
-if name_override_on and name_override.strip():
-    name_ = name_override.strip()
-team  = _safe_get(player_row, "Team", "")
-age_raw = _safe_get(player_row, "Age", "")
-try: age = f"{float(age_raw):.0f}"
-except Exception: age = age_raw
-games   = _safe_get(player_row, "Matches played", _safe_get(player_row, "Games", _safe_get(player_row, "Apps", "—")))
-minutes = _safe_get(player_row, "Minutes", _safe_get(player_row, "Minutes played", "—"))
-goals   = _safe_get(player_row, "Goals", "—")
-assists = _safe_get(player_row, "Assists", "—")
-foot    = _safe_get(player_row, "Foot", _safe_get(player_row, "Preferred Foot", "—"))
-foot_display = (foot_override_text.strip() if (foot_override_on and foot_override_text and foot_override_text.strip()) else foot)
-height_text = ""
-for col in ["Height","Height (ft)","Height ft","Height (cm)"]:
-    v = _safe_get(player_row, col, "")
-    if v and v != "—":
-        height_text = str(v).strip()
-        break
+def chip_color(p:str)->str: return POS_COLORS.get(p.strip().upper(),"#2d3550")
 
-# ---------- sections ----------
-ATTACKING, DEFENSIVE, POSSESSION = [], [], []
-for lab, met in [
-    ("Goals: Non-Penalty","Non-penalty goals per 90"),
-    ("xG","xG per 90"),
-    ("Shots","Shots per 90"),
-    ("Header Goals","Head goals per 90"),
-    ("Expected Assists","xA per 90"),
-    ("Progressive Runs","Progressive runs per 90"),
-    ("Touches in Opp. Box","Touches in box per 90"),
-]:
-    if met in df_pool.columns:
-        ATTACKING.append((lab, float(np.nan_to_num(pct_series(met), nan=0.0)), val_of(met)[1]))
+# ----------------- Flags (Twemoji) -----------------
+COUNTRY_TO_CC = {
+    "united kingdom":"gb","great britain":"gb","northern ireland":"gb",
+    "england":"eng","scotland":"sct","wales":"wls",
+    "ireland":"ie","republic of ireland":"ie",
+    "spain":"es","france":"fr","germany":"de","italy":"it","portugal":"pt","netherlands":"nl","belgium":"be",
+    "austria":"at","switzerland":"ch","denmark":"dk","sweden":"se","norway":"no","finland":"fi","iceland":"is",
+    "poland":"pl","czech republic":"cz","czechia":"cz","slovakia":"sk","slovenia":"si","croatia":"hr","serbia":"rs",
+    "bosnia and herzegovina":"ba","montenegro":"me","kosovo":"xk","albania":"al","greece":"gr","hungary":"hu",
+    "romania":"ro","bulgaria":"bg","russia":"ru","ukraine":"ua","georgia":"ge","kazakhstan":"kz","azerbaijan":"az",
+    "armenia":"am","turkey":"tr","qatar":"qa","saudi arabia":"sa","uae":"ae","israel":"il","morocco":"ma",
+    "algeria":"dz","tunisia":"tn","egypt":"eg","nigeria":"ng","ghana":"gh","senegal":"sn","ivory coast":"ci",
+    "cote d'ivoire":"ci","south africa":"za","brazil":"br","argentina":"ar","uruguay":"uy","chile":"cl",
+    "colombia":"co","peru":"pe","ecuador":"ec","paraguay":"py","bolivia":"bo","mexico":"mx","canada":"ca",
+    "united states":"us","usa":"us","japan":"jp","korea":"kr","south korea":"kr","china":"cn","australia":"au",
+    "new zealand":"nz","latvia":"lv","lithuania":"lt","estonia":"ee","moldova":"md","north macedonia":"mk",
+    "malta":"mt","cyprus":"cy","luxembourg":"lu","andorra":"ad","monaco":"mc","san marino":"sm",
+}
+TWEMOJI_SPECIAL = {
+    "eng": "1f3f4-e0067-e0062-e0065-e006e-e0067-e007f",
+    "sct": "1f3f4-e0067-e0062-e0073-e0063-e006f-e0074-e007f",
+    "wls": "1f3f4-e0067-e0062-e0077-e0061-e006c-e007f",
+}
 
-for lab, met in [
-    ("Aerial Duels","Aerial duels per 90"),
-    ("Aerial Duel Success %","Aerial duels won, %"),
-    ("PAdj. Interceptions","PAdj Interceptions"),
-    ("Defensive Duels","Defensive duels per 90"),
-    ("Defensive Duel Success %","Defensive duels won, %"),
-]:
-    if met in df_pool.columns:
-        DEFENSIVE.append((lab, float(np.nan_to_num(pct_series(met), nan=0.0)), val_of(met)[1]))
+def country_norm(s: str) -> str:
+    if not s: return ""
+    return unicodedata.normalize("NFKD", s).encode("ascii","ignore").decode("ascii").strip().lower()
 
-for lab, met in [
-    ("Dribbles","Dribbles per 90"),
-    ("Dribbling Success %","Successful dribbles, %"),
-    ("Key Passes","Key passes per 90"),
-    ("Passes","Passes per 90"),
-    ("Passing Accuracy %","Accurate passes, %"),
-    ("Passes to Penalty Area","Passes to penalty area per 90"),
-    ("Passes to Penalty Area %","Accurate passes to penalty area, %"),
-    ("Deep Completions","Deep completions per 90"),
-    ("Smart Passes","Smart passes per 90"),
-]:
-    if met in df_pool.columns:
-        POSSESSION.append((lab, float(np.nan_to_num(pct_series(met), nan=0.0)), val_of(met)[1]))
+def cc_to_twemoji_code(cc: str) -> str | None:
+    if not cc or len(cc) != 2:
+        return None
+    a, b = cc.upper()
+    cp1 = 0x1F1E6 + (ord(a) - ord('A'))
+    cp2 = 0x1F1E6 + (ord(b) - ord('A'))
+    return f"{cp1:04x}-{cp2:04x}"
 
-sections = [("Attacking",ATTACKING),("Defensive",DEFENSIVE),("Possession",POSSESSION)]
-sections = [(t,lst) for t,lst in sections if lst]
+def flag_img_html(country_name: str) -> str:
+    n = country_norm(country_name)
+    cc = COUNTRY_TO_CC.get(n, "")
+    if cc in TWEMOJI_SPECIAL:
+        code = TWEMOJI_SPECIAL[cc]
+        src = f"https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/svg/{code}.svg"
+        return f"<span class='flagchip'><img src='{src}' alt='{country_name}'></span>"
+    code = cc_to_twemoji_code(cc) if len(cc) == 2 else None
+    if code:
+        src = f"https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/svg/{code}.svg"
+        return f"<span class='flagchip'><img src='{src}' alt='{country_name}'></span>"
+    return "<span class='chip'>—</span>"
 
-# ---------- drawing ----------
-def _font_name_or_fallback(pref, fallback="DejaVu Sans"):
-    from matplotlib import font_manager as fm
-    installed = {f.name for f in fm.fontManager.ttflist}
-    for n in pref:
-        if n in installed: return n
-    return fallback
+# ====================== PlaymakerStats image resolver ======================
+_PS_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www.playmakerstats.com/",
+}
 
-from matplotlib.font_manager import FontProperties
-FONT_TITLE_FAMILY = _font_name_or_fallback(["Tableau Bold","Tableau Sans Bold","Tableau"])
-FONT_BOOK_FAMILY  = _font_name_or_fallback(["Tableau Book","Tableau Sans","Tableau"])
-TITLE_FP     = FontProperties(family=FONT_TITLE_FAMILY, weight='bold',     size=24)
-H2_FP        = FontProperties(family=FONT_TITLE_FAMILY, weight='semibold', size=20)
-LABEL_FP     = FontProperties(family=FONT_BOOK_FAMILY,  weight='medium',   size=10)
-INFO_LABEL_FP= FontProperties(family=FONT_BOOK_FAMILY,  weight='bold',     size=10)
-INFO_VALUE_FP= FontProperties(family=FONT_BOOK_FAMILY,  weight='regular',  size=10)
-BAR_VALUE_FP = FontProperties(family=FONT_BOOK_FAMILY,  weight='regular',  size=8)
-TICK_FP      = FontProperties(family=FONT_BOOK_FAMILY,  weight='medium',   size=10)
-FOOTER_FP    = FontProperties(family=FONT_BOOK_FAMILY,  weight='medium',   size=10)
+def _http_get_text(url: str, retries: int = 1, timeout: int = 12) -> str:
+    import requests
+    for _ in range(retries + 1):
+        try:
+            r = requests.get(url, headers=_PS_HEADERS, timeout=timeout)
+            if r.status_code == 200:
+                return r.text
+            if r.status_code in (429, 500, 502, 503, 504):
+                time.sleep(0.6); continue
+        except Exception:
+            time.sleep(0.25); continue
+    return ""
 
-PAGE_BG = "#ebebeb"; AX_BG = "#f3f3f3"; TRACK="#d6d6d6"
-TITLE_C="#111111"; LABEL_C="#222222"; DIVIDER="#000000"
-ticks = np.arange(0,101,10)
-LEFT, RIGHT, TOP, BOT = 0.055, 0.030, 0.035, 0.07
-header_h, GAP = 0.045, 0.020
-gutter = 0.215
-BAR_FRAC = 0.92
+def _extract_og_image(html: str) -> str | None:
+    m = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', html, flags=re.I)
+    return m.group(1) if m else None
 
-def pct_to_rgb(v):
-    v=float(np.clip(v,0,100))
-    TAB_RED=np.array([199,54,60]); TAB_GOLD=np.array([240,197,106]); TAB_GREEN=np.array([61,166,91])
-    def _blend(c1,c2,t): c=c1+(c2-c1)*np.clip(t,0,1); return f"#{int(c[0]):02x}{int(c[1]):02x}{int(c[2]):02x}"
-    return _blend(TAB_RED,TAB_GOLD,v/50) if v<=50 else _blend(TAB_GOLD,TAB_GREEN,(v-50)/50)
+@st.cache_data(show_spinner=False)
+def _pick_ps_player_link(search_html: str, surname: str, team: str) -> str | None:
+    links = re.findall(r'href=["\'](/(?:player|jogador)\.php\?id=\d+[^"\']*)', search_html, flags=re.I)
+    if not links:
+        return None
+    sn = country_norm(surname); tn = country_norm(team)
+    best = None; best_score = -1
+    for rel in links:
+        m = re.search(re.escape(rel).replace("/", r"\/"), search_html)
+        ctx = ""
+        if m:
+            start = max(0, m.start()-140); end = min(len(search_html), m.end()+140)
+            ctx = country_norm(search_html[start:end])
+        s = 0
+        if sn and sn in ctx: s += 2
+        if tn and tn in ctx: s += 3
+        if rel.startswith("/player.php"): s += 1
+        if s > best_score:
+            best_score, best = s, rel
+    return "https://www.playmakerstats.com" + best if best else None
 
-import matplotlib.pyplot as plt
-from matplotlib.transforms import ScaledTranslation
+@st.cache_data(show_spinner=False, ttl=24*3600)
+def playmakerstats_image_by_surname_team(surname: str, team: str) -> str | None:
+    from urllib.parse import quote
+    q = f"{surname} {team}".strip()
+    # 1) PlaymakerStats (EN)
+    search_url = f"https://www.playmakerstats.com/search.php?search={quote(q)}"
+    html = _http_get_text(search_url, retries=1)
+    if html:
+        pl_url = _pick_ps_player_link(html, surname, team)
+        if pl_url:
+            p_html = _http_get_text(pl_url, retries=1)
+            if p_html:
+                img = _extract_og_image(p_html)
+                if img: return img
+    # 2) zerozero.pt fallback
+    search_url2 = f"https://www.zerozero.pt/procura.php?search={quote(q)}"
+    html2 = _http_get_text(search_url2, retries=1)
+    if html2:
+        links = re.findall(r'href=["\'](/jogador\.php\?id=\d+[^"\']*)', html2, flags=re.I)
+        if links:
+            rel = links[0]
+            pl_url2 = "https://www.zerozero.pt" + rel
+            p_html2 = _http_get_text(pl_url2, retries=1)
+            if p_html2:
+                img2 = _extract_og_image(p_html2)
+                if img2: return img2
+    return None
 
-fig_size   = (11.8, 9.6); dpi = 120
-title_row_h = 0.125; header_block_h = title_row_h + 0.055
-fig = plt.figure(figsize=fig_size, dpi=dpi); fig.patch.set_facecolor(PAGE_BG)
+PLACEHOLDER_IMG = "https://i.redd.it/43axcjdu59nd1.jpeg"
 
-# Title
-fig.text(LEFT, 1 - TOP - 0.010, f"{name_}\u2009|\u2009{team}",
-         ha="left", va="top", color=TITLE_C, fontproperties=TITLE_FP)
+# Helper for reading simple fields
 
-# Info rows
-def draw_pairs_line(pairs_line, y):
-    x = LEFT; renderer = fig.canvas.get_renderer()
-    for i,(lab,val) in enumerate(pairs_line):
-        t1 = fig.text(x, y, lab, ha="left", va="top", color=LABEL_C, fontproperties=INFO_LABEL_FP)
-        fig.canvas.draw(); x += t1.get_window_extent(renderer).width / fig.bbox.width
-        t2 = fig.text(x, y, str(val), ha="left", va="top", color=LABEL_C, fontproperties=INFO_VALUE_FP)
-        fig.canvas.draw(); x += t2.get_window_extent(renderer).width / fig.bbox.width
-        if i != len(pairs_line)-1:
-            t3 = fig.text(x, y, "  |  ", ha="left", va="top", color="#555555", fontproperties=INFO_VALUE_FP)
-            fig.canvas.draw(); x += t3.get_window_extent(renderer).width / fig.bbox.width
+def get_foot_text(row: pd.Series) -> str:
+    for c in ["Foot","Preferred foot","Preferred Foot"]:
+        if c in row and isinstance(row[c], str) and row[c].strip():
+            return row[c].strip()
+    return ""
 
-row1 = [("Position: ",pos), ("Age: ",age), ("Height: ", height_text if (show_height and height_text) else "—")]
-row2 = [("Games: ",games), ("Goals: ",goals), ("Assists: ",assists)]
-row3 = [("Minutes: ",minutes), ("Foot: ",foot_display)]
-title_y = 1 - TOP - 0.010
-y1 = title_y - 0.055; y2 = y1 - 0.039; y3 = y2 - 0.039
-draw_pairs_line(row1, y1); draw_pairs_line(row2, y2); draw_pairs_line(row3, y3)
+# ====================== RENDER TILES ======================
+show_table = st.checkbox("Show compact table under tiles", True)
 
-# Divider
-fig.lines.append(plt.Line2D([LEFT, 1 - RIGHT],[1 - TOP - header_block_h + 0.004]*2,
-                            transform=fig.transFigure, color=DIVIDER, lw=0.8, alpha=0.35))
+subset = ranked.head(int(top_n)).copy().reset_index(drop=True)
 
-# Panels
-def draw_panel(panel_top, title, tuples, *, show_xticks=False, draw_bottom_divider=True):
-    n = len(tuples)
-    if n == 0: return panel_top
-    total_rows = sum(len(lst) for _, lst in sections)
-    rows_space_total = 1 - (TOP + BOT) - header_block_h - header_h*len(sections) - GAP*(len(sections)-1)
-    row_slot = rows_space_total / max(total_rows,1)
+for idx,row in subset.iterrows():
+    rank = idx+1
+    surname = str(row.get("Player","")) or ""
+    team    = str(row.get("Team","")) or ""
+    league  = str(row.get("League","")) or ""
+    pos_full= str(row.get("Position","")) or ""
+    age     = int(row.get("Age",0)) if not pd.isna(row.get("Age",np.nan)) else 0
+    birth_country = str(row.get("Birth country","") or "") if "Birth country" in row else ""
+    foot_txt = get_foot_text(row)
 
-    fig.text(LEFT, panel_top - 0.012, title, ha="left", va="top", color=TITLE_C, fontproperties=H2_FP)
+    # Avatar via PlaymakerStats
+    avatar_url = playmakerstats_image_by_surname_team(surname, team) or PLACEHOLDER_IMG
 
-    ax = fig.add_axes([LEFT + gutter, panel_top - header_h - n*row_slot, 1 - LEFT - RIGHT - gutter, n*row_slot])
-    ax.set_facecolor(AX_BG); ax.set_xlim(0,100); ax.set_ylim(-0.5,n-0.5)
-    for s in ax.spines.values(): s.set_visible(False)
-    ax.tick_params(axis="x", bottom=False, labelbottom=False, length=0)
-    ax.tick_params(axis="y", left=False,  labelleft=False,  length=0)
-    ax.set_yticks([]); ax.get_yaxis().set_visible(False)
+    fit_val = float(row.get("Fit %", 0.0))
+    fit_i = min(99, int(round(fit_val)))
+    ov_style = f"background:{rating_color(fit_i)};"
 
-    for i in range(n):
-        ax.add_patch(plt.Rectangle((0, i-(BAR_FRAC/2)), 100, BAR_FRAC, color=TRACK, ec="none", zorder=0.5))
-    for gx in ticks:
-        ax.vlines(gx, -0.5, n-0.5, colors=(0,0,0,0.16), linewidth=0.8, zorder=0.75)
+    # position chips (CF first)
+    codes = [c for c in re.split(r"[,/; ]+", pos_full.strip().upper()) if c]
+    if "CF" in codes: codes = ["CF"] + [c for c in codes if c!="CF"]
+    chips_html = "".join(f"<span class='pos' style='background:{chip_color(c)}'>{c}</span> " for c in dict.fromkeys(codes))
 
-    for i,(lab,pct,val_str) in enumerate(tuples[::-1]):
-        y = i; bar_w = float(np.clip(pct,0,100))
-        ax.add_patch(plt.Rectangle((0, y-(BAR_FRAC/2)), bar_w, BAR_FRAC, color=pct_to_rgb(bar_w), ec="none", zorder=1.0))
-        x_text = 1.0 if bar_w >= 3 else min(100.0, bar_w + 0.8)
-        ax.text(x_text, y, val_str, ha="left", va="center", color="#0B0B0B", fontproperties=BAR_VALUE_FP, zorder=2.0, clip_on=False)
+    # flag + meta
+    def flag_and_meta_html(country_name: str, age: int, foot_txt: str) -> str:
+        flag_html = flag_img_html(country_name) if country_name else ""
+        age_chip = f"<span class='chip'>{age}y.o.</span>" if age>0 else ""
+        foot_row = f"<div class='row'><span class='chip'>{foot_txt}</span></div>" if foot_txt else "<div class='row'></div>"
+        top_row = f"<div class='row'>{flag_html}{age_chip}</div>"
+        return top_row + foot_row
 
-    ax.axvline(50, color="#000000", ls=(0,(4,4)), lw=1.5, alpha=0.7, zorder=3.5)
+    st.markdown(f"""
+    <div class='wrap'>
+      <div class='player-card'>
+        <div class='leftcol'>
+          <div class='avatar' style="background-image:url('{avatar_url}');"></div>
+          {flag_and_meta_html(birth_country, age, foot_txt)}
+        </div>
+        <div>
+          <div class='name'>{surname}</div>
+          <div class='row' style='align-items:center;'>
+            <span class='pill' style='{ov_style}'>{fit_i}</span>
+            <span class='sub'>Fit %</span>
+          </div>
+          <div class='row'>{chips_html}</div>
+          <div class='teamline'>{team} · {league}</div>
+        </div>
+        <div class='rank'>#{rank}</div>
+      </div>
+    </div>
+    <div class='divider'></div>
+    """, unsafe_allow_html=True)
 
-    for i,(lab,_,_) in enumerate(tuples[::-1]):
-        y_fig = (panel_top - header_h - n*row_slot) + ((i + 0.5) * row_slot)
-        fig.text(LEFT, y_fig, lab, ha="left", va="center", color=LABEL_C, fontproperties=LABEL_FP)
+    # === dropdown with individual metrics ===
+    with st.expander("▼ Show individual metrics"):
+        def pct_of_row(row: pd.Series, metric: str) -> float:
+            col = f"{metric} Percentile"
+            v = float(row[col]) if col in df_pool.columns and col in row and not pd.isna(row[col]) else np.nan
+            if np.isnan(v):
+                # fallback: compute percentile within current league for this one metric on the fly
+                try:
+                    vals = pd.to_numeric(df_pool[df_pool["League"]==row["League"]][metric], errors="coerce").dropna()
+                    if len(vals):
+                        v0 = float(row.get(metric, np.nan))
+                        v = float((vals <= v0).mean()*100.0) if not np.isnan(v0) else 0.0
+                    else:
+                        v = 0.0
+                except Exception:
+                    v = 0.0
+            return max(0.0, min(100.0, float(v)))
 
-    if show_xticks:
-        trans = ax.get_xaxis_transform()
-        offset_inner   = ScaledTranslation(7/72,0,fig.dpi_scale_trans)
-        offset_pct_0   = ScaledTranslation(4/72,0,fig.dpi_scale_trans)
-        offset_pct_100 = ScaledTranslation(10/72,0,fig.dpi_scale_trans)
-        y_label = -0.075
-        for gx in ticks:
-            ax.plot([gx,gx],[-0.03,0.0], transform=trans, color=(0,0,0,0.6), lw=1.1, clip_on=False, zorder=4)
-            ax.text(gx, y_label, f"{int(gx)}", transform=trans, ha="center", va="top", color="#000", fontproperties=TICK_FP, zorder=4, clip_on=False)
-            if gx==0:   ax.text(gx, y_label, "%", transform=trans+offset_pct_0,   ha="left", va="top", color="#000", fontproperties=TICK_FP)
-            elif gx==100: ax.text(gx, y_label, "%", transform=trans+offset_pct_100, ha="left", va="top", color="#000", fontproperties=TICK_FP)
-            else:       ax.text(gx, y_label, "%", transform=trans+offset_inner,   ha="left", va="top", color="#000", fontproperties=TICK_FP)
+        def show99(x: float) -> int:
+            try:
+                return min(99, int(round(float(x))))
+            except Exception:
+                return 0
 
-    if draw_bottom_divider:
-        y0 = (panel_top - header_h - n*row_slot) - 0.008
-        fig.lines.append(plt.Line2D([LEFT, 1 - RIGHT], [y0, y0], transform=fig.transFigure, color=DIVIDER, lw=1.2, alpha=0.35))
-    return (panel_top - header_h - n*row_slot) - GAP
+        def metrics_section_html(title: str, items: list[tuple[str, float, str]]) -> str:
+            rows = []
+            for lab, pct, val_str in items:
+                pct_i = show99(pct)
+                rows.append(
+                    f"<div class='m-row'>"
+                    f"  <div class='m-label'>{lab}</div>"
+                    f"  <div class='m-right'><span class='m-badge' style='background:{rating_color(pct_i)}'>{pct_i}</span></div>"
+                    f"</div>"
+                )
+            return f"<div class='metric-section'><div class='m-title'>{title}</div>{''.join(rows)}</div>"
 
-# draw sections
-y_top = 1 - TOP - header_block_h
-for idx,(title,data) in enumerate(sections):
-    is_last = idx == len(sections)-1
-    y_top = draw_panel(y_top, title, data, show_xticks=is_last, draw_bottom_divider=not is_last)
+        def val_str(row: pd.Series, metric: str) -> str:
+            v = row.get(metric, None)
+            if v is None or (isinstance(v, float) and np.isnan(v)): return "—"
+            return (f"{float(v):.0f}%" if "%" in metric else f"{float(v):.2f}") if isinstance(v,(int,float,np.floating)) else str(v)
 
-# footer
-fig.text((LEFT + gutter + (1 - RIGHT))/2.0, BOT * 0.1, footer_caption_text,
-         ha="center", va="center", color="#222222", fontproperties=FOOTER_FP)
+        ATTACKING = []
+        for lab, met in [
+            ("Goals: Non-Penalty","Non-penalty goals per 90"),
+            ("xG","xG per 90"),
+            ("Shots","Shots per 90"),
+            ("Header Goals","Head goals per 90"),
+            ("Expected Assists","xA per 90"),
+            ("Progressive Runs","Progressive runs per 90"),
+            ("Touches in Opposition Box","Touches in box per 90"),
+        ]:
+            if met in df_pool.columns:
+                ATTACKING.append((lab, pct_of_row(row, met), val_str(row, met)))
 
-st.pyplot(fig, use_container_width=True)
+        DEFENSIVE = []
+        for lab, met in [
+            ("Aerial Duels","Aerial duels per 90"),
+            ("Aerial Duel Success %","Aerial duels won, %"),
+            ("PAdj. Interceptions","PAdj Interceptions"),
+            ("Defensive Duels","Defensive duels per 90"),
+            ("Defensive Duel Success %","Defensive duels won, %"),
+        ]:
+            if met in df_pool.columns:
+                DEFENSIVE.append((lab, pct_of_row(row, met), val_str(row, met)))
 
-# download
-buf = io.BytesIO()
-fig.savefig(buf, format="png", dpi=150, bbox_inches="tight", facecolor=fig.get_facecolor())
-buf.seek(0)
-st.download_button(
-    "⬇️ Download Feature Z (PNG)",
-    data=buf.getvalue(),
-    file_name=f"{str(name_).replace(' ','_')}_featureZ.png",
-    mime="image/png",
-    key=f"download_feature_z_{uuid.uuid4().hex}"
-)
+        POSSESSION = []
+        for lab, met in [
+            ("Dribbles","Dribbles per 90"),
+            ("Dribbling Success %","Successful dribbles, %"),
+            ("Key Passes","Key passes per 90"),
+            ("Passes","Passes per 90"),
+            ("Passing Accuracy %","Accurate passes, %"),
+            ("Passes to Penalty Area","Passes to penalty area per 90"),
+            ("Passes to Penalty Area %","Accurate passes to penalty area, %"),
+            ("Deep Completions","Deep completions per 90"),
+            ("Smart Passes","Smart passes per 90"),
+        ]:
+            if met in df_pool.columns:
+                POSSESSION.append((lab, pct_of_row(row, met), val_str(row, met)))
+
+        col_html = (
+            "<div class='metrics-grid'>"
+            f"{metrics_section_html('ATTACKING', ATTACKING)}"
+            f"{metrics_section_html('DEFENSIVE', DEFENSIVE)}"
+            f"{metrics_section_html('POSSESSION', POSSESSION)}"
+            "</div>"
+        )
+        st.markdown(col_html, unsafe_allow_html=True)
+
+# ====================== Compact Table ======================
+if show_table:
+    st.markdown("---")
+    st.subheader("📋 Top Role Fits — Table (sorted by Fit %)")
+    st.dataframe(
+        subset[["Player","Team","League","Age","Minutes played","Market value","Fit %"]],
+        use_container_width=True
+    )
+
+# ====================== Download CSV ======================
+with st.sidebar:
+    st.markdown("---")
+    st.download_button(
+        "⬇️ Download Top-N (CSV)",
+        data=subset.to_csv(index=False).encode('utf-8'),
+        file_name=f"role_fit_tiles_top{int(top_n)}.csv",
+        mime="text/csv",
+        key=f"download_topn_csv_{uuid.uuid4().hex}"
+    )
+
 
 
