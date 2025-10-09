@@ -1,9 +1,12 @@
-# app.py — CF Role Template Scouting + League→Team template flow
-# Defaults: (1) League blend β ON at 0.40, (2) Use single template player = OFF
-# Stronger league-quality influence inside distance via spread-scaled additive penalty (toggleable)
+# Club Fit Tiles App — merges Role Template Scouting (app.py) with Top-20 Tiles UI (app_top20_tiles.py)
+# Key changes vs original:
+# - Replaces Top Role Matches table with glossy tiles showing each candidate and their club fit % (league-weighted) top-right.
+# - Adds PlaymakerStats photo resolver with optional per-player FotMob ID override in the dropdown to replace the avatar.
+# - Keeps the original Club Selection → Role Template flow, role distance, league mismatch penalties, and Feature Z chart/export.
 
-import io, math, uuid
+import io, math, uuid, re, time, unicodedata
 from pathlib import Path
+from urllib.parse import quote
 
 import numpy as np
 import pandas as pd
@@ -11,11 +14,12 @@ import streamlit as st
 from numpy.linalg import norm
 from numpy import exp
 
-st.set_page_config(page_title="Club Striker Scouting System", layout="wide")
-st.title("🔎 Advanced Club ST Scouting System")
+# ---------- Page ----------
+st.set_page_config(page_title="Club Striker Scouting — Tiles", layout="wide")
+st.title("🔎 Advanced Club ST Scouting — Tiles View")
 st.caption(
-    "Club Selection "
-    "Individual player specific or generalized role"
+    "Club Selection → Role Template matching with glossy tiles instead of a table. "
+    "Right label shows overall Fit %. Dropdown per tile lets you set a FotMob ID to override the photo."
 )
 
 # ======================== CSV loader ========================
@@ -160,7 +164,6 @@ with st.sidebar:
         "Penalise league mismatch inside distance (α, p)", value=True,
         help="Adds a distance-penalty based on |candidate league − template league|."
     )
-    # Wider max and higher default so it *matters*
     alpha = st.slider("League mismatch weight α", 0.0, 5.0, 1.20, 0.05,
                       help="Scales mismatch; combined with distance spread for real impact.")
     p_exp = st.slider("League mismatch exponent p", 1.0, 3.0, 1.50, 0.10,
@@ -172,7 +175,8 @@ with st.sidebar:
         help="Additive: base + scaled penalty (strong). Quadrature: sqrt(base^2 + penalty^2) (gentler)."
     )
 
-    top_n = st.number_input("Top N (table)", 5, 200, 50, 5)
+    top_n = st.number_input("How many tiles (Top N)", 5, 200, 20, 5)
+    DEBUG_PHOTOS = st.checkbox("Debug player photos", False)
 
 # ======================== candidate pool (affected by sidebar) ========================
 df_pool = df[df["League"].isin(leagues_sel)].copy()
@@ -317,16 +321,270 @@ else:
 cf_pool["Role Fit Score"] = (1.0 - beta) * base_score + beta * league_part
 ranked = cf_pool.sort_values("Role Fit Score", ascending=False).reset_index(drop=True)
 
+# ======================== Tiles (replace table) ========================
 st.markdown("---")
-st.header("🏅 Top Role Matches")
-st.dataframe(
-    ranked[["Player","Team","League","Age","Minutes played","Market value","Role Fit Score"]].head(int(top_n)),
-    use_container_width=True
+st.header("🏅 Top Role Matches — Tiles")
+
+# ---------- Style (from tiles app, tweaked) ----------
+st.markdown(
+    """
+<style>
+  :root { --bg:#0f1115; --card:#161a22; --muted:#a8b3cf; --soft:#202633; }
+  .block-container { padding-top:.8rem; }
+  body{ background:var(--bg); font-family: system-ui,-apple-system,'Segoe UI','Segoe UI Emoji',Roboto,Helvetica,Arial,sans-serif;}
+  .wrap{ display:flex; justify-content:center; }
+  .player-card{
+    width:min(980px,96%); display:grid; grid-template-columns:112px 1fr 100px;
+    gap:14px; align-items:start; background:var(--card); border:1px solid #252b3a;
+    border-radius:18px; padding:16px; box-shadow: 0 2px 14px rgba(0,0,0,.25);
+  }
+  .avatar{
+    width:112px; height:112px; border-radius:12px;
+    background-color:#0b0d12; background-size:cover; background-position:center;
+    border:1px solid #2a3145;
+  }
+  .leftcol{ display:flex; flex-direction:column; align-items:center; gap:8px; }
+  .name{ font-weight:800; font-size:22px; color:#e8ecff; margin-bottom:6px; }
+  .sub{ color:#a8b3cf; font-size:15px; }
+  .pill{ padding:2px 10px; border-radius:9px; font-weight:800; font-size:18px; color:#0b0d12; display:inline-block; min-width:42px; text-align:center; }
+  .row{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:4px 0; }
+  .chip{ background:var(--soft); color:#cbd5f5; border:1px solid #2d3550; padding:3px 10px; border-radius:10px; font-size:13px; line-height:18px; }
+  .pos{ color:#eaf0ff; font-weight:700; padding:4px 10px; border-radius:10px; font-size:12px; border:1px solid rgba(255,255,255,.08); }
+  .teamline{ color:#e6ebff; font-size:15px; font-weight:400; margin-top:2px; }
+  .fit{ color:#94f0c8; font-weight:900; font-size:28px; text-align:right; }
+  .fit small{ display:block; color:#9fb3c6; font-weight:600; font-size:12px; margin-top:4px; }
+  .divider{ height:12px; }
+
+  /* Metrics dropdown styling */
+  .metric-section{ background:#121621; border:1px solid #242b3b; border-radius:14px; padding:10px 12px; }
+  .m-title{ color:#e8ecff; font-weight:800; letter-spacing:.02em; margin:4px 0 10px 0; font-size:20px; text-transform:uppercase; }
+  .m-row{ display:flex; justify-content:space-between; align-items:center; padding:8px 8px; border-radius:10px; }
+  .m-row + .m-row{ margin-top:6px; }
+  .m-label{ color:#c9d3f2; font-size:16px; }
+  .m-right{ display:flex; align-items:center; gap:8px; }
+  .m-badge{ min-width:40px; text-align:center; padding:2px 10px; border-radius:8px; font-weight:800; font-size:18px; color:#0b0d12; border:1px solid rgba(0,0,0,.15); }
+  .metrics-grid{ display:grid; grid-template-columns:1fr; gap:12px; }
+  @media (min-width: 980px){ .metrics-grid{ grid-template-columns:repeat(3, 1fr); } }
+</style>
+""",
+    unsafe_allow_html=True,
 )
 
-# ======================== Feature Z (under the table) ========================
+PALETTE=[(0,(208,2,27)),(50,(245,166,35)),(65,(248,231,28)),(75,(126,211,33)),(85,(65,117,5)),(100,(40,90,4))]
+
+def _lerp(a,b,t): return tuple(int(round(a[i]+(b[i]-a[i])*t)) for i in range(3))
+
+def rating_color(v:float)->str:
+    v=max(0.0,min(100.0,float(v)))
+    for i in range(len(PALETTE)-1):
+        x0,c0=PALETTE[i]; x1,c1=PALETTE[i+1]
+        if v<=x1:
+            t=0 if x1==x0 else (v-x0)/(x1-x0); r,g,b=_lerp(c0,c1,t); return f"rgb({r},{g},{b})"
+    r,g,b=PALETTE[-1][1]; return f"rgb({r},{g},{b})"
+
+# ====================== PlaymakerStats image resolver ======================
+_PS_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www.playmakerstats.com/",
+}
+
+@st.cache_data(show_spinner=False, ttl=24*3600)
+def _http_get_text(url: str, retries: int = 1, timeout: int = 12) -> str:
+    import requests
+    for _ in range(retries + 1):
+        try:
+            r = requests.get(url, headers=_PS_HEADERS, timeout=timeout)
+            if r.status_code == 200:
+                return r.text
+            if r.status_code in (429, 500, 502, 503, 504):
+                time.sleep(0.6); continue
+        except Exception:
+            time.sleep(0.25); continue
+    return ""
+
+def _extract_og_image(html: str) -> str | None:
+    m = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', html, flags=re.I)
+    return m.group(1) if m else None
+
+@st.cache_data(show_spinner=False, ttl=24*3600)
+def playmakerstats_image_by_name_team(name: str, team: str) -> str | None:
+    q = f"{name} {team}".strip()
+    search_url = f"https://www.playmakerstats.com/search.php?search={quote(q)}"
+    html = _http_get_text(search_url, retries=1)
+    if html:
+        links = re.findall(r'href=["\'](/(?:player|jogador)\.php\?id=\d+[^"\']*)', html, flags=re.I)
+        if links:
+            rel = links[0]
+            p_html = _http_get_text("https://www.playmakerstats.com" + rel, retries=1)
+            if p_html:
+                img = _extract_og_image(p_html)
+                if img:
+                    return img
+    # fallback zerozero
+    search_url2 = f"https://www.zerozero.pt/procura.php?search={quote(q)}"
+    html2 = _http_get_text(search_url2, retries=1)
+    if html2:
+        links = re.findall(r'href=["\'](/jogador\.php\?id=\d+[^"\']*)', html2, flags=re.I)
+        if links:
+            p_html2 = _http_get_text("https://www.zerozero.pt" + links[0], retries=1)
+            if p_html2:
+                img2 = _extract_og_image(p_html2)
+                if img2:
+                    return img2
+    return None
+
+# FotMob pattern
+FOTMOB_URL = lambda pid: f"https://images.fotmob.com/image_resources/playerimages/{str(pid).strip()}.png"
+PLACEHOLDER_IMG = "https://i.redd.it/43axcjdu59nd1.jpeg"
+
+# Session mapping for per-player overrides
+if "fotmob_map" not in st.session_state:
+    st.session_state["fotmob_map"] = {}
+
+# Helpers for dropdown metrics (percentiles vs pool)
+def pct_series_for_player(player_row: pd.Series, col: str, within_df: pd.DataFrame) -> float:
+    vals = pd.to_numeric(within_df[col], errors="coerce").dropna()
+    if vals.empty:
+        return 0.0
+    v = pd.to_numeric(player_row.get(col), errors="coerce")
+    if pd.isna(v):
+        return 0.0
+    return float((vals <= v).mean() * 100.0)
+
+# Render tiles
+shown = 0
+for idx, row in ranked.head(int(top_n)).iterrows():
+    shown += 1
+    name  = str(row.get("Player",""))
+    team  = str(row.get("Team",""))
+    league= str(row.get("League",""))
+    pos   = str(row.get("Position",""))
+    age   = int(row.get("Age",0)) if not pd.isna(row.get("Age",np.nan)) else 0
+    minutes = int(row.get("Minutes played",0)) if not pd.isna(row.get("Minutes played",np.nan)) else 0
+    fit   = float(row.get("Role Fit Score",0.0))
+    fit_pct = max(0, min(100, int(round(fit))))
+
+    # avatar resolution: 1) FotMob override → 2) PlaymakerStats search → 3) placeholder
+    key_id = f"{name}|||{team}|||{league}"
+    fm_id = st.session_state["fotmob_map"].get(key_id, "")
+    if fm_id:
+        avatar_url = FOTMOB_URL(fm_id)
+    else:
+        avatar_url = playmakerstats_image_by_name_team(name, team) or PLACEHOLDER_IMG
+
+    if DEBUG_PHOTOS:
+        st.write(f"PHOTO DEBUG → '{name}' / '{team}' → {avatar_url}")
+
+    # color for the main pill based on fit
+    ov_style = f"background:{rating_color(fit_pct)};"
+
+    # position chip(s)
+    codes = [c for c in re.split(r"[,/; ]+", pos.strip().upper()) if c]
+    chips_html = " ".join(f"<span class='pos'>{c}</span>" for c in dict.fromkeys(codes))
+
+    st.markdown(f"""
+    <div class='wrap'>
+      <div class='player-card'>
+        <div class='leftcol'>
+          <div class='avatar' style=\"background-image:url('{avatar_url}');\"></div>
+          <div class='row'><span class='chip'>{age}y</span><span class='chip'>{minutes}m</span></div>
+        </div>
+        <div>
+          <div class='name'>{name}</div>
+          <div class='row' style='align-items:center;'>
+            <span class='pill' style='{ov_style}'>{fit_pct}</span>
+            <span class='sub'>Overall Fit</span>
+          </div>
+          <div class='row'>{chips_html}</div>
+          <div class='teamline'>{team} · {league}</div>
+        </div>
+        <div class='fit'>{fit_pct}%<small>Fit</small></div>
+      </div>
+    </div>
+    <div class='divider'></div>
+    """, unsafe_allow_html=True)
+
+    # === dropdown: metrics + FotMob override ===
+    with st.expander("▼ Show individual metrics / Set photo override"):
+        # three sections similar to your second app
+        ATTACKING = []
+        for lab, met in [
+            ("Goals: Non-Penalty","Non-penalty goals per 90"),
+            ("xG","xG per 90"),
+            ("Shots","Shots per 90"),
+            ("Header Goals","Head goals per 90"),
+            ("Expected Assists","xA per 90"),
+            ("Progressive Runs","Progressive runs per 90"),
+            ("Touches in Opposition Box","Touches in box per 90"),
+        ]:
+            if met in df_pool.columns:
+                ATTACKING.append((lab, pct_series_for_player(row, met, df_pool)))
+
+        DEFENSIVE = []
+        for lab, met in [
+            ("Aerial Duels","Aerial duels per 90"),
+            ("Aerial Duel Success %","Aerial duels won, %"),
+            ("PAdj. Interceptions","PAdj Interceptions"),
+            ("Defensive Duels","Defensive duels per 90"),
+            ("Defensive Duel Success %","Defensive duels won, %"),
+        ]:
+            if met in df_pool.columns:
+                DEFENSIVE.append((lab, pct_series_for_player(row, met, df_pool)))
+
+        POSSESSION = []
+        for lab, met in [
+            ("Dribbles","Dribbles per 90"),
+            ("Dribbling Success %","Successful dribbles, %"),
+            ("Key Passes","Key passes per 90"),
+            ("Passes","Passes per 90"),
+            ("Passing Accuracy %","Accurate passes, %"),
+            ("Passes to Penalty Area","Passes to penalty area per 90"),
+            ("Passes to Penalty Area %","Accurate passes to penalty area, %"),
+            ("Deep Completions","Deep completions per 90"),
+            ("Smart Passes","Smart passes per 90"),
+        ]:
+            if met in df_pool.columns:
+                POSSESSION.append((lab, pct_series_for_player(row, met, df_pool)))
+
+        def section_html(title: str, items: list[tuple[str,float]]):
+            rows=[]
+            for lab, pct in items:
+                pct_i = int(round(max(0.0, min(100.0, float(pct)))))
+                rows.append(
+                    f"<div class='m-row'><div class='m-label'>{lab}</div>"
+                    f"<div class='m-right'><span class='m-badge' style='background:{rating_color(pct_i)}'>{pct_i}</span></div></div>"
+                )
+            return f"<div class='metric-section'><div class='m-title'>{title}</div>{''.join(rows)}</div>"
+
+        col_html = (
+            "<div class='metrics-grid'>" +
+            section_html('ATTACKING', ATTACKING) +
+            section_html('DEFENSIVE', DEFENSIVE) +
+            section_html('POSSESSION', POSSESSION) +
+            "</div>"
+        )
+        st.markdown(col_html, unsafe_allow_html=True)
+
+        # --- FotMob override input ---
+        fm_input = st.text_input(
+            "FotMob Player ID (override avatar — e.g. 75115)",
+            value=fm_id,
+            key=f"fm_{idx}_{uuid.uuid4().hex[:6]}"
+        )
+        col_a, col_b = st.columns([1,3])
+        with col_a:
+            if st.button("Apply to this player", key=f"apply_{idx}"):
+                st.session_state["fotmob_map"][key_id] = fm_input.strip()
+                st.success("Saved. Rerun to refresh the avatar.")
+        with col_b:
+            if st.button("Clear override", key=f"clear_{idx}"):
+                st.session_state["fotmob_map"].pop(key_id, None)
+                st.info("Cleared. Rerun to refresh the avatar.")
+
+# ======================== Feature Z (unchanged) ========================
 st.markdown("---")
-st.header("Advanced Individual Player Analysis")
+st.header("Advanced Individual Player Analysis (Feature Z)")
 
 # lazy imports so the app paints fast
 import matplotlib.pyplot as plt
@@ -446,7 +704,11 @@ for lab, met in [
 sections = [("Attacking",ATTACKING),("Defensive",DEFENSIVE),("Possession",POSSESSION)]
 sections = [(t,lst) for t,lst in sections if lst]
 
-# ---------- drawing ----------
+# ---------- drawing (same as original Feature Z) ----------
+import matplotlib.pyplot as plt
+from matplotlib.transforms import ScaledTranslation
+from matplotlib.font_manager import FontProperties
+
 def _font_name_or_fallback(pref, fallback="DejaVu Sans"):
     from matplotlib import font_manager as fm
     installed = {f.name for f in fm.fontManager.ttflist}
@@ -454,7 +716,6 @@ def _font_name_or_fallback(pref, fallback="DejaVu Sans"):
         if n in installed: return n
     return fallback
 
-from matplotlib.font_manager import FontProperties
 FONT_TITLE_FAMILY = _font_name_or_fallback(["Tableau Bold","Tableau Sans Bold","Tableau"])
 FONT_BOOK_FAMILY  = _font_name_or_fallback(["Tableau Book","Tableau Sans","Tableau"])
 TITLE_FP     = FontProperties(family=FONT_TITLE_FAMILY, weight='bold',     size=24)
@@ -474,14 +735,12 @@ header_h, GAP = 0.045, 0.020
 gutter = 0.215
 BAR_FRAC = 0.92
 
+TAB_RED=np.array([199,54,60]); TAB_GOLD=np.array([240,197,106]); TAB_GREEN=np.array([61,166,91])
+
 def pct_to_rgb(v):
     v=float(np.clip(v,0,100))
-    TAB_RED=np.array([199,54,60]); TAB_GOLD=np.array([240,197,106]); TAB_GREEN=np.array([61,166,91])
     def _blend(c1,c2,t): c=c1+(c2-c1)*np.clip(t,0,1); return f"#{int(c[0]):02x}{int(c[1]):02x}{int(c[2]):02x}"
     return _blend(TAB_RED,TAB_GOLD,v/50) if v<=50 else _blend(TAB_GOLD,TAB_GREEN,(v-50)/50)
-
-import matplotlib.pyplot as plt
-from matplotlib.transforms import ScaledTranslation
 
 fig_size   = (11.8, 9.6); dpi = 120
 title_row_h = 0.125; header_block_h = title_row_h + 0.055
@@ -492,6 +751,7 @@ fig.text(LEFT, 1 - TOP - 0.010, f"{name_}\u2009|\u2009{team}",
          ha="left", va="top", color=TITLE_C, fontproperties=TITLE_FP)
 
 # Info rows
+
 def draw_pairs_line(pairs_line, y):
     x = LEFT; renderer = fig.canvas.get_renderer()
     for i,(lab,val) in enumerate(pairs_line):
@@ -515,6 +775,7 @@ fig.lines.append(plt.Line2D([LEFT, 1 - RIGHT],[1 - TOP - header_block_h + 0.004]
                             transform=fig.transFigure, color=DIVIDER, lw=0.8, alpha=0.35))
 
 # Panels
+
 def draw_panel(panel_top, title, tuples, *, show_xticks=False, draw_bottom_divider=True):
     n = len(tuples)
     if n == 0: return panel_top
@@ -591,6 +852,7 @@ st.download_button(
 )
 import matplotlib.pyplot as _plt_cleanup
 _plt_cleanup.close(fig)
+
 
 
 
