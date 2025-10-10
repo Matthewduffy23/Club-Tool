@@ -269,9 +269,36 @@ def compute_strikers():
     pool["BaseDist"] = pool.apply(lambda r: norm([r[c]-r[f"__tmpl__{c}"] for c in cols]), axis=1)
 
     ranked = _score_block(pool.copy())
-    return ranked, pool, "Strikers (CF)"
+    return ranked, pool, "Strikers (CF)", tmpl_src
 
 def compute_attackers():
+    # -------- Position filter (attacker) --------
+    role_choice = st.radio(
+        "Position filter (Attackers)",
+        ["All", "Left Wingers", "Right Wingers", "Attacking Midfielders"],
+        index=0,
+        horizontal=True,
+        key="att_role_choice",
+    )
+
+    def _primary_token(pos: str) -> str:
+        p = str(pos).upper().strip()
+        tokens = [t for t in re.split(r"[,/;]\s*|\s+", p) if t]
+        return tokens[0] if tokens else ""
+
+    def position_filter(pos: str) -> bool:
+        t0 = _primary_token(pos)
+        if role_choice == "All":
+            allowed = {"RW", "RWF", "RAMF", "LW", "LWF", "LAMF", "AMF"}
+            return t0 in allowed
+        if role_choice == "Right Wingers":
+            return t0 in {"RW", "RWF", "RAMF"}
+        if role_choice == "Left Wingers":
+            return t0 in {"LW", "LWF", "LAMF"}
+        if role_choice == "Attacking Midfielders":
+            return t0 == "AMF"
+        return False
+
     # features for attackers (your snippet)
     feats = [
         'Accurate passes, %','xG per 90','Non-penalty goals per 90','Touches in box per 90',
@@ -280,12 +307,7 @@ def compute_attackers():
         'Dribbles per 90','Progressive runs per 90'
     ]
 
-    def pos_ok(p):
-        s = str(p).strip().upper()
-        if s in ("RW","LW"): return True
-        return s.startswith(("RWB","RWF","RAMF","LWB","LWF","LAMF","RW ","LW ","RW/","LW/"))
-
-    tmpl_src = _template_rows_for_role(pos_ok).dropna(subset=feats)
+    tmpl_src = _template_rows_for_role(position_filter).dropna(subset=feats)
     if use_single_template_player:
         players = sorted(tmpl_src["Player"].dropna().astype(str).unique())
         chosen = st.selectbox("Template player (Attackers)", ["— Select —"] + players, index=0, key="att_tmpl_pick")
@@ -305,7 +327,7 @@ def compute_attackers():
     tmpl_vec = f[cols].mean()
 
     base_pool = build_base_pool()
-    pool = base_pool[base_pool["Position"].apply(pos_ok)].copy()
+    pool = base_pool[base_pool["Position"].apply(position_filter)].copy()
     pool = pool[~((pool["Team"].astype(str) == template_team) & (pool["League"].astype(str) == template_league))]
     # caps for attackers (your snippet)
     pool = pool[(pd.to_numeric(pool["Age"], errors="coerce") <= 23) &
@@ -325,7 +347,13 @@ def compute_attackers():
     pool["BaseDist"] = pool.apply(lambda r: norm([r[c]-r[f"__tmpl__{c}"] for c in cols]), axis=1)
 
     ranked = _score_block(pool.copy())
-    return ranked, pool, "Attackers (Wingers/AM)"
+    subset = {
+        "All": "Wingers/AM",
+        "Left Wingers": "Left Wingers",
+        "Right Wingers": "Right Wingers",
+        "Attacking Midfielders": "AMF",
+    }[role_choice]
+    return ranked, pool, f"Attackers ({subset})", tmpl_src
 
 def compute_central_mid():
     feats = [
@@ -377,9 +405,18 @@ def compute_central_mid():
     pool["BaseDist"] = pool.apply(lambda r: norm([r[c]-r[f"__tmpl__{c}"] for c in cols]), axis=1)
 
     ranked = _score_block(pool.copy())
-    return ranked, pool, "Central Midfield"
+    return ranked, pool, "Central Midfield", tmpl_src
 
 def compute_fullbacks():
+    # -------- Position filter (fullbacks) --------
+    role_choice = st.radio(
+        "Position filter (Fullbacks)",
+        ["All", "Left Backs", "Right Backs"],
+        index=0,
+        horizontal=True,
+        key="fb_role_choice",
+    )
+
     feats = [
         'Passes per 90','Forward passes per 90',
         'Progressive passes per 90','Progressive runs per 90',
@@ -388,11 +425,19 @@ def compute_fullbacks():
         'Shots per 90','Passes to penalty area per 90',
         'Accurate passes, %'
     ]
-    def pos_ok(p):
-        s = str(p).strip().upper()
-        return s.startswith(("LB","LWB","RB","RWB"))
+    def position_filter(pos: str) -> bool:
+        s = str(pos).strip().upper()
+        tokens = [t for t in re.split(r"[,/;]\s*|\s+", s) if t]
+        t0 = tokens[0] if tokens else ""
+        if role_choice == "Right Backs":
+            prefixes = ("RB", "RWB")
+        elif role_choice == "Left Backs":
+            prefixes = ("LB", "LWB")
+        else:
+            prefixes = ("RB", "RWB", "LB", "LWB")
+        return any(t0.startswith(pf) for pf in prefixes)
 
-    tmpl_src = _template_rows_for_role(pos_ok).dropna(subset=feats)
+    tmpl_src = _template_rows_for_role(position_filter).dropna(subset=feats)
     if use_single_template_player:
         players = sorted(tmpl_src["Player"].dropna().astype(str).unique())
         chosen = st.selectbox("Template player (Fullbacks)", ["— Select —"] + players, index=0, key="fb_tmpl_pick")
@@ -411,7 +456,7 @@ def compute_fullbacks():
     tmpl_vec = f[cols].mean()
 
     base_pool = build_base_pool()
-    pool = base_pool[base_pool["Position"].apply(pos_ok)].copy()
+    pool = base_pool[base_pool["Position"].apply(position_filter)].copy()
     pool = pool[~((pool["Team"].astype(str) == template_team) & (pool["League"].astype(str) == template_league))]
     pool = pool[(pd.to_numeric(pool["Age"], errors="coerce") <= 30) &
                 (pd.to_numeric(pool["Market value"], errors="coerce") <= 10_000_000) &
@@ -429,7 +474,12 @@ def compute_fullbacks():
     pool["BaseDist"] = pool.apply(lambda r: norm([r[c]-r[f"__tmpl__{c}"] for c in cols]), axis=1)
 
     ranked = _score_block(pool.copy())
-    return ranked, pool, "Fullbacks"
+    subset = {
+        "All": "Fullbacks",
+        "Left Backs": "Left Backs",
+        "Right Backs": "Right Backs",
+    }[role_choice]
+    return ranked, pool, subset, tmpl_src
 
 def compute_center_backs():
     feats = [
@@ -478,7 +528,7 @@ def compute_center_backs():
     pool["BaseDist"] = pool.apply(lambda r: norm([r[c]-r[f"__tmpl__{c}"] for c in cols]), axis=1)
 
     ranked = _score_block(pool.copy())
-    return ranked, pool, "Center Backs"
+    return ranked, pool, "Center Backs", tmpl_src
 
 # ======================== UI: tabs for roles ========================
 tab_st, tab_att, tab_cm, tab_fb, tab_cb = st.tabs(
@@ -891,20 +941,39 @@ def render_tiles_and_featureZ(ranked: pd.DataFrame, df_pool_role: pd.DataFrame, 
     fig_size   = (11.8, 9.6); dpi = 120
     title_row_h = 0.125; header_block_h = title_row_h + 0.055
     fig = plt.figure(figsize=fig_size, dpi=dpi); fig.patch.set_facecolor(PAGE_BG)
+    try:
+        # Ensure renderer is ready before measuring text extents
+        fig.canvas.draw()
+    except Exception:
+        pass
 
     fig.text(LEFT, 1 - TOP - 0.010, f"{name_}\u2009|\u2009{team}",
             ha="left", va="top", color=TITLE_C, fontproperties=TITLE_FP)
 
     def draw_pairs_line(pairs_line, y):
-        x = LEFT; renderer = fig.canvas.get_renderer()
+        x = LEFT
+        try:
+            renderer = fig.canvas.get_renderer()
+        except Exception:
+            renderer = None
         for i,(lab,val) in enumerate(pairs_line):
             t1 = fig.text(x, y, lab, ha="left", va="top", color=LABEL_C, fontproperties=INFO_LABEL_FP)
-            fig.canvas.draw(); x += t1.get_window_extent(renderer).width / fig.bbox.width
+            if renderer is not None:
+                fig.canvas.draw()
+                x += t1.get_window_extent(renderer).width / fig.bbox.width
+            else:
+                x += 0.06
             t2 = fig.text(x, y, str(val), ha="left", va="top", color=LABEL_C, fontproperties=INFO_VALUE_FP)
-            fig.canvas.draw(); x += t2.get_window_extent(renderer).width / fig.bbox.width
+            if renderer is not None:
+                fig.canvas.draw(); x += t2.get_window_extent(renderer).width / fig.bbox.width
+            else:
+                x += 0.06
             if i != len(pairs_line)-1:
                 t3 = fig.text(x, y, "  |  ", ha="left", va="top", color="#555555", fontproperties=INFO_VALUE_FP)
-                fig.canvas.draw(); x += t3.get_window_extent(renderer).width / fig.bbox.width
+                if renderer is not None:
+                    fig.canvas.draw(); x += t3.get_window_extent(renderer).width / fig.bbox.width
+                else:
+                    x += 0.03
 
     row1 = [("Position: ",pos), ("Age: ",age), ("Height: ", height_text if (show_height and height_text) else "—")]
     row2 = [("Games: ",games), ("Goals: ",goals), ("Assists: ",assists)]
@@ -999,37 +1068,43 @@ def render_tiles_and_featureZ(ranked: pd.DataFrame, df_pool_role: pd.DataFrame, 
 
 # ======================== per-tab compute + render ========================
 with tab_st:
-    ranked, pool, tag = compute_strikers()
+    ranked, pool, tag, tmpl_src = compute_strikers()
     st.subheader("🧩 Players used for Striker Role Template")
-    showcols = [c for c in ["Player","Minutes played","Position","League"] if c in df.columns]
-    st.dataframe(
-        df[(df["Team"]==template_team) & (df["League"]==template_league) & (df["Position"].str.upper().str.startswith("CF"))][showcols].sort_values("Minutes played", ascending=False) if showcols else pd.DataFrame(),
-        use_container_width=True
-    )
+    showcols = [c for c in ["Player","Minutes played","Position","League"] if c in tmpl_src.columns]
+    if showcols:
+        st.dataframe(tmpl_src[showcols].sort_values("Minutes played", ascending=False), use_container_width=True)
     render_tiles_and_featureZ(ranked, pool, tag)
 
 with tab_att:
-    ranked, pool, tag = compute_attackers()
+    ranked, pool, tag, tmpl_src = compute_attackers()
     st.subheader("🧩 Players used for Attacker Role Template")
-    showcols = [c for c in ["Player","Minutes played","Position","League"] if c in df.columns]
+    showcols = [c for c in ["Player","Minutes played","Position","League"] if c in tmpl_src.columns]
+    if showcols:
+        st.dataframe(tmpl_src[showcols].sort_values("Minutes played", ascending=False), use_container_width=True)
     render_tiles_and_featureZ(ranked, pool, tag)
 
 with tab_cm:
-    ranked, pool, tag = compute_central_mid()
+    ranked, pool, tag, tmpl_src = compute_central_mid()
     st.subheader("🧩 Players used for CM Role Template")
-    showcols = [c for c in ["Player","Minutes played","Position","League"] if c in df.columns]
+    showcols = [c for c in ["Player","Minutes played","Position","League"] if c in tmpl_src.columns]
+    if showcols:
+        st.dataframe(tmpl_src[showcols].sort_values("Minutes played", ascending=False), use_container_width=True)
     render_tiles_and_featureZ(ranked, pool, tag)
 
 with tab_fb:
-    ranked, pool, tag = compute_fullbacks()
+    ranked, pool, tag, tmpl_src = compute_fullbacks()
     st.subheader("🧩 Players used for FB Role Template")
-    showcols = [c for c in ["Player","Minutes played","Position","League"] if c in df.columns]
+    showcols = [c for c in ["Player","Minutes played","Position","League"] if c in tmpl_src.columns]
+    if showcols:
+        st.dataframe(tmpl_src[showcols].sort_values("Minutes played", ascending=False), use_container_width=True)
     render_tiles_and_featureZ(ranked, pool, tag)
 
 with tab_cb:
-    ranked, pool, tag = compute_center_backs()
+    ranked, pool, tag, tmpl_src = compute_center_backs()
     st.subheader("🧩 Players used for CB Role Template")
-    showcols = [c for c in ["Player","Minutes played","Position","League"] if c in df.columns]
+    showcols = [c for c in ["Player","Minutes played","Position","League"] if c in tmpl_src.columns]
+    if showcols:
+        st.dataframe(tmpl_src[showcols].sort_values("Minutes played", ascending=False), use_container_width=True)
     render_tiles_and_featureZ(ranked, pool, tag)
 
 
