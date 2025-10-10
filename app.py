@@ -537,7 +537,7 @@ def compute_center_backs():
     ranked = _score_block(pool.copy())
     return ranked, pool, "Center Backs", tmpl_src
 
-# --- PART 2 ---
+    # --- PART 2 ---
 
 # ---------- Style for tiles ----------
 st.markdown(
@@ -577,12 +577,25 @@ body{ background:var(--bg); font-family: system-ui,-apple-system,'Segoe UI','Seg
 PALETTE=[(0,(208,2,27)),(50,(245,166,35)),(65,(248,231,28)),(75,(126,211,33)),(85,(65,117,5)),(100,(40,90,4))]
 def _lerp(a,b,t): return tuple(int(round(a[i]+(b[i]-a[i])*t)) for i in range(3))
 def rating_color(v:float)->str:
+    # HTML/CSS rgb(...)
     v=max(0.0,min(100.0,float(v)))
     for i in range(len(PALETTE)-1):
         x0,c0=PALETTE[i]; x1,c1=PALETTE[i+1]
         if v<=x1:
             t=0 if x1==x0 else (v-x0)/(x1-x0); r,g,b=_lerp(c0,c1,t); return f"rgb({r},{g},{b})"
     r,g,b=PALETTE[-1][1]; return f"rgb({r},{g},{b})"
+
+def rating_color_hex(v: float) -> str:
+    # Matplotlib-friendly HEX
+    v = max(0.0, min(100.0, float(v)))
+    for i in range(len(PALETTE)-1):
+        x0,c0=PALETTE[i]; x1,c1=PALETTE[i+1]
+        if v<=x1:
+            t=0 if x1==x0 else (v-x0)/(x1-x0)
+            r,g,b=_lerp(c0,c1,t)
+            return f"#{r:02x}{g:02x}{b:02x}"
+    r,g,b=PALETTE[-1][1]
+    return f"#{r:02x}{g:02x}{b:02x}"
 
 # ====================== PlaymakerStats image resolver ======================
 _PS_HEADERS = {
@@ -801,7 +814,7 @@ def render_tiles_and_featureZ(ranked: pd.DataFrame, df_pool_role: pd.DataFrame, 
                     try: st.rerun()
                     except Exception: st.experimental_rerun()
 
-    # ======================== Feature Z (stability fixes for #2) ========================
+    # ======================== Feature Z (stability + Matplotlib color fixes) ========================
     st.markdown("---")
     st.header(f"Advanced Individual Player Analysis (Feature Z) · {role_title}")
 
@@ -913,7 +926,6 @@ def render_tiles_and_featureZ(ranked: pd.DataFrame, df_pool_role: pd.DataFrame, 
     sections = [("Attacking",ATTACKING),("Defensive",DEFENSIVE),("Possession",POSSESSION)]
     sections = [(t,lst) for t,lst in sections if lst]
 
-    # ---- rendering with guards against empty/overlap (glitch fix) ----
     import matplotlib.pyplot as _plt_cleanup
 
     def _font_name_or_fallback(pref, fallback="DejaVu Sans"):
@@ -944,7 +956,6 @@ def render_tiles_and_featureZ(ranked: pd.DataFrame, df_pool_role: pd.DataFrame, 
     gutter = 0.215
     BAR_FRAC = 0.92
 
-    # if all sections empty, short-circuit gracefully
     if not sections:
         st.info("No comparable metrics available for this role/player.")
         return
@@ -988,13 +999,17 @@ def render_tiles_and_featureZ(ranked: pd.DataFrame, df_pool_role: pd.DataFrame, 
         ax.set_yticks([]); ax.get_yaxis().set_visible(False)
 
         for i in range(n):
-            ax.add_patch(plt.Rectangle((0, i-(BAR_FRAC/2)), 100, BAR_FRAC, color=TRACK, ec="none", zorder=0.5))
+            ax.add_patch(plt.Rectangle((0, i-(BAR_FRAC/2)), 100, BAR_FRAC, facecolor=TRACK, edgecolor="none", linewidth=0, zorder=0.5))
         for gx in ticks:
             ax.vlines(gx, -0.5, n-0.5, colors=(0,0,0,0.16), linewidth=0.8, zorder=0.75)
 
         for i,(lab,pct,val_str) in enumerate(tuples[::-1]):
             y = i; bar_w = float(np.clip(pct,0,100))
-            ax.add_patch(plt.Rectangle((0, y-(BAR_FRAC/2)), bar_w, BAR_FRAC, color=None if bar_w==0 else rating_color(bar_w), ec="none", zorder=1.0))
+            if bar_w > 0:
+                ax.add_patch(plt.Rectangle(
+                    (0, y-(BAR_FRAC/2)), bar_w, BAR_FRAC,
+                    facecolor=rating_color_hex(bar_w), edgecolor="none", linewidth=0, zorder=1.0
+                ))
             x_text = 1.0 if bar_w >= 3 else min(100.0, bar_w + 0.8)
             ax.text(x_text, y, val_str, ha="left", va="center", color="#0B0B0B", fontproperties=BAR_VALUE_FP, zorder=2.0, clip_on=False)
 
@@ -1054,7 +1069,7 @@ tab_st, tab_att, tab_cm, tab_fb, tab_cb = st.tabs(
 
 with tab_st:
     ranked, pool, tag, tmpl_src = compute_strikers()
-    render_template_players_used("Striker", tmpl_src)  # fix #1
+    render_template_players_used("Striker", tmpl_src)
     render_tiles_and_featureZ(ranked, pool, tag)
 
 with tab_att:
@@ -1064,12 +1079,12 @@ with tab_att:
         horizontal=True, key="att_role_choice"
     )
     ranked, pool, tag, tmpl_src, _pos_ok = compute_attackers(ROLE_CHOICE_ATT)
-    render_template_players_used("Attacker", tmpl_src)  # fix #1
+    render_template_players_used("Attacker", tmpl_src)
     render_tiles_and_featureZ(ranked, pool, tag)
 
 with tab_cm:
     ranked, pool, tag, tmpl_src = compute_central_mid()
-    render_template_players_used("CM", tmpl_src)  # fix #1
+    render_template_players_used("CM", tmpl_src)
     render_tiles_and_featureZ(ranked, pool, tag)
 
 with tab_fb:
@@ -1079,14 +1094,13 @@ with tab_fb:
         horizontal=True, key="fb_role_choice"
     )
     ranked, pool, tag, tmpl_src, _pos_ok = compute_fullbacks(ROLE_CHOICE_FB)
-    render_template_players_used("Fullback", tmpl_src)  # fix #1
+    render_template_players_used("Fullback", tmpl_src)
     render_tiles_and_featureZ(ranked, pool, tag)
 
 with tab_cb:
     ranked, pool, tag, tmpl_src = compute_center_backs()
-    render_template_players_used("CB", tmpl_src)  # fix #1
+    render_template_players_used("CB", tmpl_src)
     render_tiles_and_featureZ(ranked, pool, tag)
-
 
 
 
